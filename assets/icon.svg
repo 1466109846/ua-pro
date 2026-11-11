@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Magpie Claude Code UA">
+  <rect width="64" height="64" rx="14" fill="#3b2b24"/>
+  <g fill="none" stroke="#f0b79b" stroke-width="3.2" stroke-linecap="round">
+    <path d="M32 11.5v9.2M32 43.3v9.2M11.5 32h9.2M43.3 32h9.2"/>
+    <path d="M17.4 17.4l6.5 6.5M40.1 40.1l6.5 6.5M46.6 17.4l-6.5 6.5M23.9 40.1l-6.5 6.5"/>
+  </g>
+  <circle cx="32" cy="32" r="7" fill="#e6a184"/>
+  <circle cx="32" cy="32" r="2.4" fill="#3b2b24"/>
+</svg>

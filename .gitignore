@@ -1,0 +1,16 @@
+runtime/
+node_modules/
+tests/
+scripts/
+docs/
+examples/
+.agents/
+AGENTS.md
+VERIFICATION.md
+RESEARCH.md
+PARITY.md
+LIVE-TEST-*.md
+.env
+.env.*
+*.tgz
+*.zip

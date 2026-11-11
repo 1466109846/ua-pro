@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>UA PRO · 出站兼容管理</title>
+  <script src="./theme.js"></script>
+  <link rel="stylesheet" href="./pro.css">
+  <link rel="icon" type="image/svg+xml" href="./icon.svg">
+  <script type="module" src="./ui/pro.js"></script>
+</head>
+<body>
+  <div id="pro-shell" class="pro-shell" data-ready="false">
+    <aside class="pro-side">
+      <a class="pro-brand" href="#overview" aria-label="UA PRO 概览"><span class="pro-mark" aria-hidden="true"><img src="./icon.svg" width="40" height="40" alt=""></span><span class="pro-brand-text"><span class="pro-eyebrow">MAGPIE</span><strong>UA PRO</strong><small>Claude Code · Codex 出站兼容</small></span></a>
+      <p class="pro-side-copy">配置连接，选择模板，<br>用真实模型验证请求。</p>
+      <nav id="pro-nav" class="pro-nav" data-nav aria-label="UA PRO 分区">
+        <a href="#overview" data-view-link="overview">概览</a>
+        <a href="#connections" data-view-link="connections">连接与模型</a>
+        <a href="#templates" data-view-link="templates">模板库</a>
+        <a href="#tests" data-view-link="tests">测试</a>
+        <a href="./accounts" data-leave="accounts">余额与签到<span class="nav-ext">独立页面</span></a>
+        <a href="#settings" data-view-link="settings">设置</a>
+      </nav>
+      <dl class="pro-side-meta">
+        <div class="pro-local-note"><dt>本地保存</dt><dd>密钥只存本机，不会显示在页面上。</dd></div>
+        <div><dt>配置 generation</dt><dd id="pro-generation" class="mono">—</dd></div>
+        <div><dt>运行</dt><dd id="pro-runtime">读取中</dd></div>
+      </dl>
+    </aside>
+
+    <main class="pro-main" id="pro-main">
+      <header class="pro-head">
+        <div class="pro-head-text"><h1 id="pro-title">概览</h1><p id="pro-status" role="status">正在读取 UA PRO 状态…</p></div>
+        <div class="pro-head-actions"><button id="pro-reload" type="button" class="ghost">重新读取</button><button id="pro-close" type="button" class="ghost">完成并关闭</button></div>
+      </header>
+      <div id="pro-error" class="pro-alert" role="alert" tabindex="-1" hidden></div>
+      <div id="pro-pending" class="pro-pending" role="status" hidden>
+        <p id="pro-pending-text">操作结果未确认。</p>
+        <div class="pending-actions"><button id="pro-recover" type="button" class="primary">查询操作结果</button><button id="pro-unlock" type="button" class="ghost" hidden>重新读取并解锁</button></div>
+      </div>
+
+      <section id="view-overview" data-view="overview" aria-labelledby="pro-title">
+        <div id="overview-metrics" class="metrics"></div>
+        <div id="overview-empty" class="empty" hidden>
+          <h2>还没有连接</h2>
+          <p>添加站点地址和 key 后即可使用。未指定模板时按协议自动绑定：Responses 用 Codex，Messages 用 Claude Code，Chat Completions 与 Gemini 普通转发。</p>
+          <button type="button" class="primary" data-action="connection-new">添加连接</button>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>连接与生效状态</h2><a href="#connections" class="link">管理连接</a></div>
+          <div id="overview-connections" class="overview-list"></div>
+        </div>
+        <p class="note">保存成功只表示配置已写入文件；正在运行的宿主是否已采用，以实际请求观察到的 generation 为准。</p>
+      </section>
+
+      <section id="view-connections" data-view="connections" aria-labelledby="pro-title" hidden>
+        <div class="toolbar"><p>同一站点可以有多个 key；每个连接独立锁定模板版本与模型能力。</p><div class="toolbar-actions"><button id="binding-open" type="button" class="ghost">应用模板</button><button id="connection-new" type="button" class="primary" data-action="connection-new">添加连接</button></div></div>
+        <div class="split">
+          <div id="connection-list" class="conn-list"></div>
+          <div id="connection-panel" class="side-panel" hidden>
+            <form id="connection-form" class="panel form-panel" novalidate hidden>
+              <div class="panel-head"><h2 id="connection-form-title">添加连接</h2><span id="connection-form-state" class="tag"></span></div>
+              <div class="grid2">
+                <label class="field">显示名<input id="conn-name" maxlength="200" autocomplete="off" required></label>
+                <label class="field">站点地址<input id="conn-base" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://api.example.com"></label>
+              </div>
+              <fieldset class="group">
+                <legend>认证</legend>
+                <p id="conn-host-note" class="hint" hidden>凭据由 Magpie 宿主账号提供，此处不保存 key。</p>
+                <div class="grid2">
+                  <label class="field">方式<select id="conn-auth-mode"><option value="api-key">API key（按协议发送）</option><option value="bearer">Authorization: Bearer</option><option value="custom">完整 Authorization 值</option><option value="none">不发送凭据</option></select></label>
+                  <label class="field" id="conn-key-field">Key<input id="conn-key" type="password" autocomplete="new-password" spellcheck="false"></label>
+                  <label class="field" id="conn-value-field" hidden>Authorization 值<input id="conn-value" type="password" autocomplete="new-password" spellcheck="false"></label>
+                </div>
+                <p id="conn-secret-state" class="hint"></p>
+                <label class="check" id="conn-clear-field" hidden><input id="conn-clear-secret" type="checkbox">清除已保存凭据</label>
+              </fieldset>
+              <fieldset class="group">
+                <legend>协议与模型</legend>
+                <label class="field">默认上游协议<select id="conn-protocol"><option value="auto">自动（按请求协议）</option><option value="anthropic">Messages</option><option value="responses">Responses</option><option value="chat-completions">Chat Completions</option><option value="gemini">Gemini</option></select></label>
+                <div class="model-fetch-actions"><span class="field-label">模型列表</span><div class="row-actions"><button id="conn-model-fetch" type="button" class="ghost">获取模型</button><button id="conn-model-cancel" type="button" class="ghost" hidden>取消获取</button></div></div>
+                <p id="conn-model-status" class="hint" role="status" aria-live="polite">使用上方地址、认证方式和密钥读取模型，无需先保存；不会发送生成请求。</p>
+                <p id="conn-model-proxy-note" class="hint">宿主与独立配置工具的代理设置可能不同，两处获取结果可能不一致。</p>
+                <div id="conn-model-result" class="model-fetch-result" hidden>
+                  <label id="conn-model-options-label" class="field" for="conn-model-options">获取到的模型（可多选）</label><select id="conn-model-options" multiple size="6" aria-describedby="conn-model-status"></select>
+                  <div class="row-actions"><button id="conn-model-all" type="button" class="ghost">全选</button><button id="conn-model-add" type="button" class="primary">追加选中模型</button><button id="conn-model-replace" type="button" class="ghost">替换为选中模型</button></div>
+                  <p class="hint">填入仅修改草稿。读取模型列表成功不代表模型生成已验证。</p>
+                </div>
+                <label class="field">模型（每行一个，可手填）<textarea id="conn-models" rows="4" spellcheck="false" placeholder="获取后选择填入，或手动输入模型 ID"></textarea></label>
+                <label class="field">模型协议覆盖（每行：模型 = 协议）<textarea id="conn-model-protocols" rows="3" spellcheck="false" placeholder="gpt-5-codex = responses"></textarea></label>
+                <details class="more">
+                  <summary>自定义协议根路径</summary>
+                  <p class="hint">只填协议根路径，例如 /v1；不要填具体的 /messages 等请求路径。留空使用默认。</p>
+                  <div class="grid2">
+                    <label class="field">Messages<input data-api-path="anthropic" spellcheck="false" placeholder="/v1"></label>
+                    <label class="field">Responses<input data-api-path="responses" spellcheck="false" placeholder="/v1"></label>
+                    <label class="field">Chat Completions<input data-api-path="chat-completions" spellcheck="false" placeholder="/v1"></label>
+                    <label class="field">Gemini<input data-api-path="gemini" spellcheck="false" placeholder="/v1beta"></label>
+                  </div>
+                </details>
+              </fieldset>
+              <fieldset class="group">
+                <legend>站点与绑定</legend>
+                <label class="check"><input id="conn-enabled" type="checkbox" checked>启用此连接</label>
+                <label class="check"><input id="conn-independent" type="checkbox">在 Magpie 中独立显示此站点（需重载宿主）</label>
+                <label class="field" id="conn-site-field">站点 ID<input id="conn-site" maxlength="64" spellcheck="false" placeholder="main"></label>
+                <label class="field" id="conn-binding-field">初始模板绑定<select id="conn-binding"></select></label>
+                <p id="conn-binding-note" class="hint" hidden>已有连接的模板绑定只能通过“应用模板”更改，保存连接不会改变它。</p>
+              </fieldset>
+              <p id="connection-form-error" class="form-error" role="alert"></p>
+              <div class="form-actions"><button id="connection-remove" type="button" class="danger" hidden>删除连接</button><span class="spacer"></span><button id="connection-cancel" type="button" class="ghost">取消</button><button id="connection-save" type="submit" class="primary">保存连接</button></div>
+            </form>
+
+            <form id="binding-form" class="panel form-panel" novalidate hidden>
+              <div class="panel-head"><h2>应用模板版本</h2><span class="tag mono" id="binding-generation"></span></div>
+              <fieldset class="group"><legend>连接</legend><div id="binding-connections" class="check-list"></div></fieldset>
+              <div class="grid2">
+                <label class="field">范围<select id="binding-scope"><option value="connection">连接默认</option><option value="model">单个模型覆盖</option></select></label>
+                <label class="field" id="binding-model-field" hidden>模型<input id="binding-model" list="binding-model-list" spellcheck="false" autocomplete="off"><datalist id="binding-model-list"></datalist></label>
+              </div>
+              <label class="field">绑定方式<select id="binding-mode"><option value="auto">自动（Responses→Codex，Messages→Claude Code）</option><option value="template">指定模板版本</option><option value="passthrough">普通转发（不改写身份与正文）</option></select></label>
+              <div class="grid2" id="binding-template-fields">
+                <label class="field">模板<select id="binding-template"></select></label>
+                <label class="field">版本<select id="binding-revision"></select></label>
+              </div>
+              <p id="binding-summary" class="hint"></p>
+              <p id="binding-error" class="form-error" role="alert"></p>
+              <div class="form-actions"><span class="spacer"></span><button id="binding-cancel" type="button" class="ghost">取消</button><button id="binding-apply" type="submit" class="primary">应用</button></div>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-templates" data-view="templates" aria-labelledby="pro-title" hidden>
+        <div id="template-library">
+          <div class="toolbar"><label class="check"><input id="template-show-archived" type="checkbox">显示已归档</label><div class="toolbar-actions"><button id="template-import" type="button" class="ghost">导入模板</button><input id="template-import-file" type="file" accept="application/json,.json" hidden><button id="template-new" type="button" class="primary">新增模板</button></div></div>
+          <div id="template-list" class="tpl-list"></div>
+        </div>
+
+        <form id="template-editor" class="tpl-editor" novalidate hidden>
+          <header class="tpl-head">
+            <button id="tpl-back" type="button" class="link">返回模板库</button>
+            <div class="tpl-head-main">
+              <label class="field tpl-name-field">模板名称<input id="tpl-name" maxlength="160" autocomplete="off" required></label>
+              <dl class="tpl-meta">
+                <div><dt>版本</dt><dd id="tpl-revision" class="mono">—</dd></div>
+                <div><dt>基线</dt><dd id="tpl-base">—</dd></div>
+                <div><dt>草稿</dt><dd id="tpl-state">—</dd></div>
+              </dl>
+            </div>
+            <p id="tpl-readonly" class="readonly-note" hidden>内置模板只读。要修改，请以它为基线新增模板。<button id="tpl-fork" type="button" class="ghost">以此为基线新增</button></p>
+          </header>
+          <div class="tpl-body">
+            <div class="tpl-sections">
+              <fieldset class="group">
+                <legend>匹配与识别</legend>
+                <div class="field"><span class="field-label">适用协议</span><div id="tpl-protocols" class="chips"></div></div>
+                <div class="field"><span class="field-label">适用操作</span><div id="tpl-operations" class="chips"></div></div>
+                <label class="field">原始 UA 识别<select id="tpl-detector"><option value="none">不识别</option><option value="codex-ua">匹配 Codex UA</option><option value="claude-ua">匹配 Claude UA</option></select></label>
+                <p class="hint">识别是兼容启发式，用来区分原生与第三方调用，不是官方客户端认证。</p>
+              </fieldset>
+              <fieldset class="group">
+                <legend>客户端标识</legend>
+                <label class="field">身份模式<select id="tpl-mode"><option value="reference-compatible">参考兼容（按基线补全身份）</option><option value="preserve">保留入站身份</option></select></label>
+                <div class="grid2">
+                  <label class="field">User-Agent<input id="tpl-ua" spellcheck="false" autocomplete="off"></label>
+                  <label class="field">客户端版本<input id="tpl-version" spellcheck="false" autocomplete="off"></label>
+                </div>
+              </fieldset>
+              <fieldset class="group">
+                <legend>会话策略</legend>
+                <label class="field">会话标识<select id="tpl-session"><option value="reference-stable">稳定兼容标识</option><option value="host">宿主真实 session</option><option value="preserve">保留入站</option><option value="off">关闭</option></select></label>
+                <p id="tpl-session-hint" class="hint"></p>
+              </fieldset>
+              <fieldset class="group wide">
+                <legend>请求头</legend>
+                <p class="hint">动作：覆盖、仅缺失补充、缺失或空补充、删除、保留。认证头与传输控制头由宿主最后处理，模板不能设置。</p>
+                <div class="hdr-scroll"><table id="tpl-headers" class="hdr-table">
+                  <colgroup><col class="c-on"><col class="c-name"><col class="c-action"><col class="c-value"><col class="c-when"><col class="c-ops"><col class="c-row"></colgroup>
+                  <thead><tr><th scope="col">启用</th><th scope="col">名称</th><th scope="col">动作</th><th scope="col">值</th><th scope="col">条件</th><th scope="col">限定操作</th><th scope="col"><span class="sr-only">行操作</span></th></tr></thead>
+                  <tbody></tbody>
+                </table></div>
+                <div class="row-actions"><button id="tpl-header-add" type="button" class="ghost">添加请求头</button><span id="tpl-header-count" class="hint"></span></div>
+              </fieldset>
+              <fieldset class="group wide">
+                <legend>请求正文</legend>
+                <div class="grid3">
+                  <label class="check"><input id="tpl-codex-metadata" type="checkbox">Codex 元数据提升</label>
+                  <label class="check"><input id="tpl-fast-beta" type="checkbox">fast beta 联动</label>
+                  <label class="field">Claude 身份补全<select id="tpl-claude-compat"><option value="off">关闭</option><option value="third-party-messages">第三方 /messages 补全 system 与 user_id</option></select></label>
+                </div>
+                <details class="more" id="tpl-identity-details">
+                  <summary>身份提示词（高级）</summary>
+                  <label class="field">system 前缀文本<textarea id="tpl-identity-prompt" rows="3" spellcheck="false" placeholder="留空使用基线默认"></textarea></label>
+                </details>
+                <div class="grid3">
+                  <label class="field">parameters.defaults（JSON）<textarea id="tpl-defaults" class="code" rows="6" spellcheck="false"></textarea></label>
+                  <label class="field">parameters.overrides（JSON）<textarea id="tpl-overrides" class="code" rows="6" spellcheck="false"></textarea></label>
+                  <label class="field">parameters.remove（每行一个）<textarea id="tpl-remove" class="code" rows="6" spellcheck="false"></textarea></label>
+                </div>
+                <p class="hint">默认保护 model、messages、tools、tool_choice 和 stream；count_tokens 不做正文变更。</p>
+              </fieldset>
+              <fieldset class="group wide">
+                <legend>限制</legend>
+                <div class="grid3">
+                  <label class="field">正文读取上限（字节）<input id="tpl-max-body" type="number" min="1" max="67108864" step="1" inputmode="numeric"></label>
+                  <label class="field">读取时限（毫秒）<input id="tpl-body-timeout" type="number" min="1" max="60000" step="1" inputmode="numeric"></label>
+                  <label class="field">元数据上限（字节）<input id="tpl-max-metadata" type="number" min="1" max="4194304" step="1" inputmode="numeric"></label>
+                </div>
+              </fieldset>
+            </div>
+            <aside class="tpl-preview" aria-label="有效规则">
+              <h3>相对基线的变化</h3>
+              <div id="tpl-changes" class="diff-list"></div>
+              <h3>有效规则（请求头值已脱敏）</h3>
+              <pre id="tpl-json" class="code-block"></pre>
+            </aside>
+          </div>
+          <p id="tpl-error" class="form-error" role="alert"></p>
+          <footer class="tpl-actions">
+            <span id="tpl-dirty" class="tpl-dirty"></span>
+            <button id="tpl-discard" type="button" class="ghost">放弃草稿</button>
+            <button id="tpl-export" type="button" class="ghost">导出脱敏副本</button>
+            <button id="tpl-preview" type="button" class="ghost">本地预览</button>
+            <button id="tpl-apply" type="button" class="ghost">应用到连接</button>
+            <button id="tpl-save" type="submit" class="primary">保存新版本</button>
+          </footer>
+        </form>
+      </section>
+
+      <section id="view-tests" data-view="tests" aria-labelledby="pro-title" hidden>
+        <div class="split tests-split">
+          <form id="test-form" class="panel form-panel" novalidate>
+            <label class="field">测试层次<select id="test-kind"><option value="preview">本地转换预览（不联网）</option><option value="check">连接检查（只读取模型列表）</option><option value="infer">实际模型请求（一次简短合成请求）</option></select></label>
+            <p id="test-kind-hint" class="hint"></p>
+            <label class="field">连接<select id="test-connection"></select></label>
+            <div id="test-template-fields">
+              <label class="field">本次测试模板<select id="test-template-source"><option value="auto">自动适配本次协议（推荐）</option><option value="binding">严格使用连接绑定</option><option value="ref">指定已保存版本</option><option value="draft">当前草稿（临时快照）</option><option value="none">不使用模板（普通转发）</option></select></label>
+              <div class="grid2" id="test-ref-fields" hidden>
+                <label class="field">模板<select id="test-template"></select></label>
+                <label class="field">版本<select id="test-revision"></select></label>
+              </div>
+            </div>
+            <div class="grid2" id="test-protocol-fields">
+              <label class="field">上游协议<select id="test-protocol"><option value="anthropic">Messages</option><option value="responses">Responses</option><option value="chat-completions">Chat Completions</option><option value="gemini">Gemini</option></select></label>
+              <label class="field">操作<select id="test-operation"></select></label>
+            </div>
+            <div class="test-model-picker" id="test-model-fields">
+              <div class="test-model-actions">
+                <label class="field" for="test-model-select">测试模型</label>
+                <div class="row-actions"><button id="test-model-fetch" type="button" class="ghost">刷新模型</button><button id="test-model-cancel" type="button" class="ghost" hidden>取消获取</button></div>
+              </div>
+              <select id="test-model-select" class="test-model-select" aria-describedby="test-model-status"><option value="">请先选择连接</option></select>
+              <p id="test-model-status" class="hint test-model-status" role="status" aria-live="polite">选择连接后自动载入已保存或已发现的模型。</p>
+              <button id="test-model-manual" type="button" class="link" aria-expanded="false" aria-controls="test-model-manual-field">手动输入模型 ID</button>
+              <label class="field test-model-manual" id="test-model-manual-field" hidden>模型 ID（高级）<input id="test-model" list="test-model-list" spellcheck="false" autocomplete="off" placeholder="仅在列表未包含所需模型时填写"><datalist id="test-model-list"></datalist></label>
+            </div>
+            <label class="check check-inline" id="test-stream-field"><input id="test-stream" type="checkbox">流式响应</label>
+            <section id="test-plan" class="test-plan" aria-labelledby="test-plan-title">
+              <div class="panel-head"><h3 id="test-plan-title">本次请求</h3><span id="test-plan-state" class="tag"></span></div>
+              <code id="test-plan-url" class="test-plan-url"></code>
+              <p id="test-plan-template" class="hint"></p>
+              <p id="test-plan-note" class="hint"></p>
+              <p id="test-production-route" class="hint"></p>
+              <code id="test-model-reference" class="test-plan-url"></code>
+              <button id="test-route-save" type="button" class="ghost" hidden>将本次协议与模板保存为此模型路由</button>
+              <p id="test-plan-error" class="form-error" role="status" aria-live="polite"></p>
+              <details class="more" id="test-endpoint-options"><summary>本次协议路径（高级）</summary><label class="field">协议根路径<input id="test-api-path" autocomplete="off" spellcheck="false" placeholder="留空使用此连接的协议根路径"></label><p class="hint">例如 /v1 或 /anthropic/v1。只影响本次测试，不修改连接；不能填写外域地址或完整的 /messages 路径。</p></details>
+              <p class="hint">这是上游直测，不是客户端协议转换。站点地址相同不代表支持每一种 API；模型名称也不能证明接口能力。</p>
+            </section>
+            <details class="more" id="test-sample">
+              <summary>入站样例</summary>
+              <label class="field">请求头（JSON 对象）<textarea id="test-headers" class="code" rows="4" spellcheck="false">{}</textarea></label>
+              <label class="field">正文（JSON）<textarea id="test-body" class="code" rows="8" spellcheck="false"></textarea></label>
+              <button id="test-sample-reset" type="button" class="ghost">恢复默认样例</button>
+            </details>
+            <div id="test-sample-notice" class="test-sample-notice" role="status" hidden><p>已保留自定义样例。协议或模型改变后，请核对正文；不会替你静默覆盖。</p><button id="test-sample-adapt" type="button" class="ghost">使用当前协议的简短样例</button></div>
+            <p id="test-error" class="form-error" role="alert" tabindex="-1"></p>
+            <div class="form-actions"><span class="spacer"></span><button id="test-cancel" type="button" class="ghost" hidden>取消测试</button><button id="test-run" type="submit" class="primary">运行本地预览</button></div>
+          </form>
+          <div class="test-result-column"><div id="test-result-stale" class="test-result-stale" role="status" hidden>当前选择已改变。下方是上一次测试结果，不代表当前模型、协议或端点；重新测试后更新。</div><div id="test-result" class="panel result" aria-live="polite"><p class="empty-note">选择连接和模型，核对本次请求后运行。结果会标明模型、协议、地址和测试时间。</p></div></div>
+        </div>
+      </section>
+
+      <section id="view-settings" data-view="settings" aria-labelledby="pro-title" hidden>
+        <div class="settings-grid">
+          <div class="panel">
+            <h2>外观</h2>
+            <label class="field" for="theme-mode">主题</label>
+            <select id="theme-mode" data-theme-control><option value="system">跟随系统</option><option value="dark">夜间模式</option><option value="light">浅色模式</option></select>
+          </div>
+          <div class="panel">
+            <h2>其他页面</h2>
+            <p class="hint">在独立页面管理站点账号、余额与签到，打开前会确认未保存的草稿。</p>
+            <div class="link-row"><a href="./accounts" class="btn ghost" data-leave="accounts">余额与签到</a></div>
+          </div>
+          <div class="panel wide">
+            <h2>迁移旧 Claude 配置</h2>
+            <p class="hint">把本机旧 Claude 独立配置复制为 UA PRO 新连接，并绑定 14 头自定义模板。不修改、不停用原配置和原插件；写入前先预览映射。</p>
+            <div class="link-row"><button id="migration-preview" type="button" class="ghost">预览迁移</button><button id="migration-apply" type="button" class="primary" hidden>确认迁移</button></div>
+            <div id="migration-result" class="migration-result"></div>
+          </div>
+          <div class="panel wide">
+            <h2>本次配置会话</h2>
+            <dl id="session-info" class="kv"></dl>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="template-base-dialog" class="dialog" aria-labelledby="template-base-title">
+    <form id="template-base-form" method="dialog" novalidate>
+      <h2 id="template-base-title">新增模板</h2>
+      <p class="hint">先选基线，完整复制其规则为独立草稿。之后基线更新不会自动改写这份模板。</p>
+      <label class="field">基线<select id="template-base-select"></select></label>
+      <label class="field">模板名称<input id="template-base-name" maxlength="160" autocomplete="off"></label>
+      <p id="template-base-error" class="form-error" role="alert"></p>
+      <div class="form-actions"><span class="spacer"></span><button id="template-base-cancel" type="button" class="ghost">取消</button><button id="template-base-confirm" type="submit" class="primary">复制为草稿</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="template-history" class="dialog dialog-wide" aria-labelledby="history-title">
+    <div class="dialog-head"><h2 id="history-title">版本历史</h2><button id="history-close" type="button" class="ghost">关闭</button></div>
+    <div id="history-body" class="history-body"></div>
+    <div id="history-diff" class="history-diff"></div>
+  </dialog>
+
+  <dialog id="test-confirm" class="dialog" aria-labelledby="test-confirm-title">
+    <form method="dialog">
+      <h2 id="test-confirm-title">确认发起网络请求</h2>
+      <p id="test-confirm-text"></p>
+      <dl id="test-confirm-detail" class="kv"></dl>
+      <div class="form-actions"><span class="spacer"></span><button id="test-confirm-cancel" type="submit" value="cancel" class="ghost">取消</button><button id="test-confirm-send" type="submit" value="confirm" class="primary">确认发送</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="dialog" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title">确认</h2>
+      <p id="confirm-text"></p>
+      <div class="form-actions"><span class="spacer"></span><button id="confirm-cancel" type="submit" value="cancel" class="ghost">继续编辑</button><button id="confirm-ok" type="submit" value="confirm" class="danger">确认</button></div>
+    </form>
+  </dialog>
+</body>
+</html>

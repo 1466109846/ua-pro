@@ -1,0 +1,79 @@
+{
+  "name": "opencode-claude-code-ua",
+  "version": "0.3.6",
+  "private": true,
+  "description": "UA PRO: versioned Codex and Claude compatibility templates, multi-protocol connections, previews and explicit upstream tests",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1466109846/ua-pro.git"
+  },
+  "homepage": "https://github.com/1466109846/ua-pro#readme",
+  "bugs": {
+    "url": "https://github.com/1466109846/ua-pro/issues"
+  },
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./server": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "setup.mjs",
+    "lib",
+    "src",
+    "ui",
+    "assets",
+    "README.md",
+    "NOTICE.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node --check index.mjs && node --check src/plugin.mjs && node --check lib/parameters.mjs",
+    "setup": "node setup.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "magpie",
+    "anthropic",
+    "claude-code",
+    "user-agent"
+  ],
+  "magpie": {
+    "name": "UA PRO",
+    "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgcm9sZT0iaW1nIiBhcmlhLWxhYmVsPSJNYWdwaWUgQ2xhdWRlIENvZGUgVUEiPgogIDxyZWN0IHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgcng9IjE0IiBmaWxsPSIjM2IyYjI0Ii8+CiAgPGcgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZjBiNzliIiBzdHJva2Utd2lkdGg9IjMuMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIj4KICAgIDxwYXRoIGQ9Ik0zMiAxMS41djkuMk0zMiA0My4zdjkuMk0xMS41IDMyaDkuMk00My4zIDMyaDkuMiIvPgogICAgPHBhdGggZD0iTTE3LjQgMTcuNGw2LjUgNi41TTQwLjEgNDAuMWw2LjUgNi41TTQ2LjYgMTcuNGwtNi41IDYuNU0yMy45IDQwLjFsLTYuNSA2LjUiLz4KICA8L2c+CiAgPGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iNyIgZmlsbD0iI2U2YTE4NCIvPgogIDxjaXJjbGUgY3g9IjMyIiBjeT0iMzIiIHI9IjIuNCIgZmlsbD0iIzNiMmIyNCIvPgo8L3N2Zz4=",
+    "summary": {
+      "zh": "Codex 与 Claude 客户端模板、版本化应用回退、四协议连接与转换测试。",
+      "en": "Versioned Codex and Claude templates, four-protocol connections, previews and explicit tests."
+    },
+    "maxConcurrency": 4,
+    "options": {
+      "userAgent": "claude-cli/2.1.316 (external, claude-vscode, agent-sdk/0.3.316)",
+      "headers": {
+        "accept": "application/json",
+        "anthropic-beta": "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,advanced-tool-use-2025-11-20,effort-2025-11-24,dangerous-tool-use-2026-09-03,afk-mode-2026-01-31",
+        "anthropic-dangerous-direct-browser-access": "true",
+        "anthropic-version": "2023-06-01",
+        "x-app": "cli",
+        "x-stainless-arch": "x64",
+        "x-stainless-lang": "js",
+        "x-stainless-os": "Windows",
+        "x-stainless-package-version": "0.128.0",
+        "x-stainless-retry-count": "0",
+        "x-stainless-runtime": "node",
+        "x-stainless-runtime-version": "v26.12.1",
+        "x-stainless-timeout": "300"
+      },
+      "parameters": {
+        "defaults": {},
+        "overrides": {},
+        "remove": []
+      }
+    }
+  }
+}
