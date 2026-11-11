@@ -2,22 +2,33 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { AccountValidationError, createNewApiClient, NewApiError, normalizeAccountConfig, safeNewApiMessage } from './newapi.mjs';
-import { scheduleOccurrence } from './schedule.mjs';
+import { scheduleDate, scheduleOccurrence } from './schedule.mjs';
 
 export { AccountValidationError } from './newapi.mjs';
 const MAX_ACCOUNTS = 100;
 const MAX_HISTORY = 90;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
 // All managers sharing a file share the transaction queue and network deduplication.
 const sessions = new Map();
 const freshStatus = () => ({ stale: false, error: null, lastAttemptAt: null });
-const freshCheckin = () => ({ date: null, checkedAt: null, rewardQuota: null, state: 'unknown', message: '' });
-const identity = a => JSON.stringify([a.siteUrl, a.userId]);
+const freshCheckin = () => ({ date: null, checkedAt: null, lastAttemptAt: null, rewardQuota: null, state: 'unknown', message: '' });
+const identity = a => JSON.stringify([a.siteUrl, a.siteType, a.userId || `username:${a.username}`]);
+// Credential-bearing fields reset when any login identity input changes, even if aliases still share a userId.
+const credentialIdentity = a => JSON.stringify([a.siteUrl, a.siteType, a.userId, a.username]);
 const missing = () => new AccountValidationError('账号不存在。', 404);
 const own = (state, id) => { const account = state.accounts.find(a => a.id === id); if (!account) throw missing(); return account; };
 const successful = result => ['success', 'already', 'already_checked'].includes(result?.state);
 const day = value => new Date(value).toISOString().slice(0, 10);
 const amount = (quota, divisor) => quota === null || quota === undefined || !Number.isFinite(quota / divisor) ? null : quota / divisor;
+const localDay = (value, timeZone) => {
+  const at = value instanceof Date ? value : typeof value === 'string' && Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
+  if (at === null) return null;
+  try { return scheduleDate(at, timeZone); } catch { return null; }
+};
+function attemptDay(checkin, timeZone) {
+  return localDay(checkin?.lastAttemptAt, timeZone) ?? localDay(checkin?.checkedAt, timeZone);
+}
 
 function projectSnapshot(snapshot, divisor) {
   if (!snapshot) return null;
@@ -29,12 +40,30 @@ function projectSnapshot(snapshot, divisor) {
 
 function publicAccount(account) {
   const config = normalizeAccountConfig(account);
-  return { id: account.id, revision: account.revision, ...config, accessToken: '', cookie: '', secrets: { accessToken: Boolean(account.accessToken), cookie: Boolean(account.cookie) },
+  const secrets = { accessToken: Boolean(account.accessToken), cookie: Boolean(account.cookie) };
+  // Keep legacy New API clients byte-compatible; AgentRouter always needs the password flag.
+  if (config.siteType === 'agentrouter' || config.password) secrets.password = Boolean(account.password);
+  return { id: account.id, revision: account.revision, ...config, accessToken: '', cookie: '', password: '', secrets,
     snapshot: projectSnapshot(account.snapshot, account.quotaPerUnit),
     history: account.history.map(item => projectSnapshot(item, account.quotaPerUnit)),
     status: { ...account.status },
-    checkin: { date: account.checkin.date, checkedAt: account.checkin.checkedAt, rewardQuota: account.checkin.rewardQuota,
+    checkin: { date: account.checkin.date, checkedAt: account.checkin.checkedAt,
+      lastAttemptAt: account.checkin.lastAttemptAt ?? null, rewardQuota: account.checkin.rewardQuota,
       reward: amount(account.checkin.rewardQuota, account.quotaPerUnit), state: account.checkin.state, message: account.checkin.message } };
+}
+
+function alreadyResult(account, source) {
+  const current = publicAccount(account);
+  const recorded = source ?? account;
+  const rewardQuota = Number.isSafeInteger(recorded.checkin?.rewardQuota) && recorded.checkin.rewardQuota >= 0
+    ? recorded.checkin.rewardQuota : current.checkin.rewardQuota;
+  return { ...current, checkin: { ...current.checkin,
+    date: recorded.checkin?.date ?? current.checkin.date,
+    checkedAt: recorded.checkin?.checkedAt ?? current.checkin.checkedAt,
+    lastAttemptAt: recorded.checkin?.lastAttemptAt ?? current.checkin.lastAttemptAt,
+    rewardQuota,
+    reward: amount(rewardQuota, account.quotaPerUnit),
+    state: 'already', message: '今日已签到。' } };
 }
 
 function totalsFor(accounts) {
@@ -116,7 +145,7 @@ export function createAccountManager({ path, fetchImpl, now = () => new Date(), 
   async function get(id) { return locked(async () => publicAccount(own(await read(), id))); }
 
   async function save(raw, clearSecrets = []) {
-    if (!Array.isArray(clearSecrets) || clearSecrets.some(name => !['accessToken', 'cookie'].includes(name))) throw new AccountValidationError('清除凭据的字段无效。');
+    if (!Array.isArray(clearSecrets) || clearSecrets.some(name => !['accessToken', 'cookie', 'password'].includes(name))) throw new AccountValidationError('清除凭据的字段无效。');
     const config = normalizeAccountConfig(raw);
     return locked(async () => {
       const state = await read();
@@ -128,8 +157,8 @@ export function createAccountManager({ path, fetchImpl, now = () => new Date(), 
           'schedule.enabled': '同一站点账号的别名只能设置一份自动签到，请先关闭另一份',
         });
       }
-      const unchangedIdentity = previous && identity(previous) === identity(config);
-      for (const secret of ['accessToken', 'cookie']) config[secret] = config[secret] || (!unchangedIdentity || clearSecrets.includes(secret) ? '' : previous?.[secret] ?? '');
+      const unchangedIdentity = previous && credentialIdentity(previous) === credentialIdentity(config);
+      for (const secret of ['accessToken', 'cookie', 'password']) config[secret] = config[secret] || (!unchangedIdentity || clearSecrets.includes(secret) ? '' : previous?.[secret] ?? '');
       const account = { ...config, id: previous?.id ?? uuid(), revision: randomUUID(),
         snapshot: unchangedIdentity ? previous.snapshot : null,
         history: unchangedIdentity ? previous.history : [],
@@ -186,33 +215,60 @@ export function createAccountManager({ path, fetchImpl, now = () => new Date(), 
     return session.refreshes.get(requestKey);
   }
 
-  function checkinResult(result, at) {
+  function checkinResult(result, at, timeZone = 'UTC') {
     const states = ['success', 'already', 'disabled', 'requires_verification', 'unknown', 'error'];
     const state = result?.state === 'already_checked' ? 'already' : states.includes(result?.state) ? result.state : 'error';
     const validDate = /^\d{4}-\d{2}-\d{2}$/u.test(result?.date ?? '') && Number.isFinite(Date.parse(result.date)) && day(result.date) === result.date;
+    const fallbackDay = localDay(at, timeZone) ?? day(at);
     const messages = { success: '签到成功。', already: '今日已签到。', disabled: '站点未启用签到。', requires_verification: '请前往站点完成验证码后签到。', unknown: '签到结果未确认，请在站点确认记录；不会自动重试。', error: '签到未完成，请前往站点检查。' };
-    return { date: successful({ state }) ? validDate ? result.date : day(at) : null,
+    return { date: successful({ state }) ? validDate ? result.date : fallbackDay : null,
       checkedAt: successful({ state }) ? at : null,
+      lastAttemptAt: at,
       rewardQuota: successful({ state }) && Number.isSafeInteger(result.rewardQuota) && result.rewardQuota >= 0 ? result.rewardQuota : null,
       state, message: messages[state],
-      // Returned site dates are authoritative; UTC is the explicit fallback when absent.
-      dedupeDay: successful({ state }) ? day(at) : null };
+      // Returned site dates are authoritative; the configured schedule zone is the fallback.
+      dedupeDay: successful({ state }) ? fallbackDay : null };
   }
 
   async function performCheckin(captured, aliases, options) {
-    const at = timestamp(); let result;
-    try { result = checkinResult(await api.checkin({ ...captured }, options), at); }
-    catch (error) {
+    const at = timestamp(); let result; let authUpdate = null;
+    try {
+      const response = await api.checkin({ ...captured }, options);
+      result = checkinResult(response, at, captured.schedule.timeZone);
+      if (response?.authenticated === true) {
+        const session = typeof response.cookie === 'string' && response.cookie
+          && response.cookie.length <= 32768 && !CONTROL.test(response.cookie) ? response.cookie : null;
+        if (typeof response.userId === 'string' && /^[1-9]\d*$/u.test(response.userId) && response.userId.length <= 32) {
+          authUpdate = { ...authUpdate, userId: response.userId };
+        }
+        if (session) {
+          authUpdate = { ...authUpdate, cookie: session };
+          // A password-only AgentRouter login can immediately use its new session.
+          // Existing PATs are never downgraded or replaced.
+          if (captured.authMode === 'token' && !captured.accessToken) authUpdate.authMode = 'cookie';
+        }
+      }
+    } catch (error) {
       const code = error instanceof NewApiError ? error.code : null;
       const state = code === 'turnstile' ? 'requires_verification' : code === 'ambiguous' ? 'unknown' : 'error';
-      result = { ...checkinResult({ state }, at), message: safeNewApiMessage(error) };
+      result = { ...checkinResult({ state }, at, captured.schedule.timeZone), message: safeNewApiMessage(error) };
     }
+    const capturedIdentity = identity(captured);
     const updated = await locked(async () => {
       const state = await read(); const initiator = state.accounts.find(a => a.id === captured.id);
       if (!initiator || initiator.revision !== captured.revision) return false;
+      if (authUpdate?.userId) initiator.userId = authUpdate.userId;
+      if (authUpdate?.cookie) initiator.cookie = authUpdate.cookie;
+      if (authUpdate?.authMode) initiator.authMode = authUpdate.authMode;
+      initiator.checkin = { ...result };
       for (const alias of aliases) {
         const current = state.accounts.find(a => a.id === alias.id);
-        if (current && current.revision === alias.revision && identity(current) === identity(captured)) current.checkin = { ...result };
+        if (current && current !== initiator && current.revision === alias.revision && identity(current) === capturedIdentity) {
+          if (authUpdate?.userId) current.userId = authUpdate.userId;
+          if (authUpdate?.cookie) current.cookie = authUpdate.cookie;
+          if (authUpdate?.authMode && current.authMode === 'token' && !current.accessToken) current.authMode = authUpdate.authMode;
+          current.checkin = { ...result };
+        }
       }
       await write(state); return true;
     });
@@ -241,8 +297,21 @@ export function createAccountManager({ path, fetchImpl, now = () => new Date(), 
       const requestKey = identity(captured);
       if (session.checkins.has(requestKey)) return { pending: session.checkins.get(requestKey) };
       const sameIdentity = state.accounts.filter(a => identity(a) === identity(captured));
-      const known = sameIdentity.find(a => successful(a.checkin) && (a.checkin.dedupeDay ?? a.checkin.date) === day(timestamp()));
-      if (known && !api.authoritativeCheckinDay) {
+      const scheduleDay = localDay(now(), captured.schedule.timeZone);
+      if (expectedRevision !== undefined && scheduleDay) {
+        // A manual or earlier timer attempt at any result blocks a second automatic POST
+        // for the same local schedule day; the persisted first record is never rewritten.
+        const attempted = sameIdentity.find(a => attemptDay(a.checkin, captured.schedule.timeZone) === scheduleDay);
+        if (attempted) {
+          return { skip: successful(attempted.checkin) ? alreadyResult(captured, attempted) : publicAccount(captured) };
+        }
+      }
+      const authoritative = captured.siteType === 'newapi' && api.authoritativeCheckinDay;
+      const known = sameIdentity.find(a => successful(a.checkin)
+        && (attemptDay(a.checkin, captured.schedule.timeZone) ?? a.checkin.dedupeDay ?? a.checkin.date) === scheduleDay);
+      if (known && !authoritative) {
+        // A repeated AgentRouter query reports done/already without touching the first reward record.
+        if (captured.siteType === 'agentrouter') return { skip: alreadyResult(captured, known) };
         if (captured !== known) { captured.checkin = { ...known.checkin }; await write(state); }
         return { skip: publicAccount(captured) };
       }

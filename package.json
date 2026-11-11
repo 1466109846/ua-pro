@@ -1,6 +1,6 @@
 {
   "name": "opencode-claude-code-ua",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"

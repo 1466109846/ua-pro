@@ -15,6 +15,7 @@ import { createConnectionDiagnostics } from './diagnostics.mjs';
 import { createAccountProfileStore } from './account-profile.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { pluginOptions, optionProfile } from './options.mjs';
+import { accountUsage, accountCheckin } from './account-usage.mjs';
 
 export const PROVIDER_ID = 'claude-code-ua';
 function modelsFor(profile) {
@@ -111,7 +112,7 @@ export async function createPlugin(input, rawOptions, dependencies = {}) {
 
   const uaStore = dependencies.uaStore ?? createUAStore(join(dirname(store.path), 'ua-pro.json'));
   const uaService = dependencies.uaService ?? createUAService({
-    store: uaStore, legacyStore: store,
+    store: uaStore, legacyStore: store, accountManager,
     readAuth: (provider, account) => currentHostAuth(account || provider),
     fetchImpl: dependencies.fetchImpl ?? globalThis.fetch,
   });
@@ -274,47 +275,16 @@ export async function createPlugin(input, rawOptions, dependencies = {}) {
         let account;
         try { account = await accountManager.refresh(id); }
         catch { return { signIn: 'kept', windows: [{ name: '可选余额', display: '绑定的站点账号不可用，请检查账号管理', aside: true }] }; }
-        return {
-          plan: 'New API',
-          user: account.name,
-          signIn: 'kept',
-          windows: [account].map((account) => {
-            const snapshot = account.snapshot;
-            const amount = (value) => value === null || value === undefined ? '—' : Number(value).toLocaleString('en-US', { maximumFractionDigits: 6 });
-            return {
-              name: account.name,
-              aside: true,
-              unit: account.unit,
-              ...(snapshot ? { balance: snapshot.remaining } : {}),
-              display: snapshot
-                ? `余额 ${amount(snapshot.remaining)} ${account.unit}；累计消耗 ${amount(snapshot.used)}；消耗增量 ${amount(snapshot.deltaUsed)}；余额变化 ${amount(snapshot.deltaBalance)}${account.status.stale ? '（缓存）' : ''}${account.status.error ? `；${account.status.error}` : ''}`
-                : account.status.error || '尚未读取余额',
-            };
-          }),
-        };
+        return accountUsage(account);
       },
       async checkin(getAuth) {
         const id = await boundAccount(getAuth);
         if (!id) return { outcome: 'inactive', message: '当前宿主账号未绑定站点账号，未发起签到' };
         let account;
         try {
-          const configured = await accountManager.get?.(id);
-          if (configured?.schedule?.enabled) return { outcome: 'inactive', message: `此账号由插件按每天 ${configured.schedule.time}（${configured.schedule.timeZone}）自动签到；如需现在执行，请在账号管理页手动签到` };
           account = await accountManager.checkin(id);
         } catch { return { outcome: 'failed', message: '绑定的站点账号签到未完成，请检查账号管理' }; }
-        const active = [account].filter((account) => account.enabled && account.checkinEnabled);
-        if (!active.length) return { outcome: 'inactive', message: '当前账号未启用签到' };
-        const success = new Set(['success', 'claimed']);
-        const done = new Set(['already', 'already_checked', 'checked', 'done']);
-        const captcha = new Set(['requires_verification', 'verification_required', 'captcha']);
-        const failed = active.some((account) => !success.has(account.checkin.state) && !done.has(account.checkin.state) && !captcha.has(account.checkin.state) && account.checkin.state !== 'disabled');
-        const needsCaptcha = active.some((account) => captcha.has(account.checkin.state));
-        const claimed = active.some((account) => success.has(account.checkin.state));
-        return {
-          outcome: failed ? 'failed' : needsCaptcha ? 'captcha' : claimed ? 'claimed' : active.every((account) => account.checkin.state === 'disabled') ? 'inactive' : 'done',
-          ...(claimed && Number.isFinite(account.checkin.reward) ? { credit: account.checkin.reward } : {}),
-          message: active.map((account) => `${account.name}：${success.has(account.checkin.state) ? `签到成功${account.checkin.reward == null ? '' : `，奖励 ${account.checkin.reward} ${account.unit}`}` : done.has(account.checkin.state) ? '今日已签到' : captcha.has(account.checkin.state) ? '需要在站点完成验证' : account.checkin.state === 'disabled' ? '站点未开启签到' : `签到失败（${account.checkin.message || '未完成'}）`}`).join('；'),
-        };
+        return accountCheckin(account);
       },
       async loader(getAuth, provider) {
         const auth = await getAuth();

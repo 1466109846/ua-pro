@@ -3,11 +3,12 @@ import { createUATestRunner } from './ua-tests.mjs'
 import { validateTemplate } from './ua-transform.mjs'
 import { lookupUAModels, readModelCatalog } from './ua-runtime.mjs'
 import { createUAModelCatalog } from './ua-model-catalog.mjs'
+import { matchesAccountSite } from '../lib/ua-protocol.mjs'
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const failure = (message, status = 400) => Object.assign(new Error(message), { status })
 
-export function createUAService({ store, legacyStore, readAuth, fetchImpl, modelFetchFor, modelCatalog = createUAModelCatalog(store.path), onConnectionSaved, runtime = () => ({ mode: 'standalone', observed: [] }) }) {
+export function createUAService({ store, legacyStore, accountManager, readAuth, fetchImpl, modelFetchFor, modelCatalog = createUAModelCatalog(store.path), onConnectionSaved, runtime = () => ({ mode: 'standalone', observed: [] }) }) {
   const test = createUATestRunner({ store, readAuth, fetchImpl, modelFetchFor })
   const initialized = () => store.initialize()
   return {
@@ -21,7 +22,10 @@ export function createUAService({ store, legacyStore, readAuth, fetchImpl, model
         connection.auth.key = ''
         connection.auth.value = ''
       }
-      return { ...snapshot, modelCatalogs, runtime: runtime() }
+      const siteAccounts = accountManager ? (await accountManager.list()).accounts.map(account => ({ id: account.id, name: account.name,
+        siteUrl: account.siteUrl, siteType: account.siteType ?? 'newapi', userId: account.userId, enabled: account.enabled,
+        checkinEnabled: account.checkinEnabled, schedule: account.schedule })) : []
+      return { ...snapshot, modelCatalogs, siteAccounts, runtime: runtime() }
     },
     async execute(action, data, { signal } = {}) {
       await initialized()
@@ -53,6 +57,11 @@ export function createUAService({ store, legacyStore, readAuth, fetchImpl, model
         }
       }
       if (action === 'connections/save') {
+        if (data.connection?.newApiAccountId) {
+          if (!accountManager) throw failure('站点账号管理尚未初始化', 409)
+          const account = await accountManager.get(data.connection.newApiAccountId)
+          if (!matchesAccountSite(data.connection.baseURL, account)) throw Object.assign(failure('余额与签到只能绑定同一站点的账号'), { fields: { newApiAccountId: '所选账号属于其他站点' } })
+        }
         const result = await store.saveConnection(data)
         if (onConnectionSaved) {
           try { await onConnectionSaved(result.connection); return { ...result, registration: 'registered', activation: 'pending-runtime-observation' } }

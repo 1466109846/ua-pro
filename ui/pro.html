@@ -106,6 +106,9 @@
                 <label class="check"><input id="conn-enabled" type="checkbox" checked>启用此连接</label>
                 <label class="check"><input id="conn-independent" type="checkbox">在 Magpie 中独立显示此站点（需重载宿主）</label>
                 <label class="field" id="conn-site-field">站点 ID<input id="conn-site" maxlength="64" spellcheck="false" placeholder="main"></label>
+                <label class="field" id="conn-site-account-field">余额与签到账号<select id="conn-site-account"><option value="">不绑定签到账号（仅查询 Key 用量）</option></select></label>
+                <p id="conn-site-account-hint" class="hint">绑定只影响余额与签到，不复制凭据，也不改变模型请求；保存时按站点根地址校验。</p>
+                <p class="hint"><a id="conn-accounts-link" href="./accounts">管理签到账号</a>：补 Cookie、用户名或密码等凭据；旧绑定失效时会保留选项并提示重新选择。</p>
                 <label class="field" id="conn-binding-field">初始模板绑定<select id="conn-binding"></select></label>
                 <p id="conn-binding-note" class="hint" hidden>已有连接的模板绑定只能通过“应用模板”更改，保存连接不会改变它。</p>
               </fieldset>

@@ -6,23 +6,26 @@ export function formatAmount(value, signed = false) {
 
 export function accountValues(account = {}) {
   return {
-    id: account.id, name: account.name ?? '', siteUrl: account.siteUrl ?? '', userId: account.userId ?? '',
-    authMode: account.authMode ?? 'token', accessToken: '', cookie: '',
+    id: account.id, name: account.name ?? '', siteType: account.siteType === 'agentrouter' ? 'agentrouter' : 'newapi',
+    siteUrl: account.siteUrl ?? '', userId: account.userId ?? '', username: account.username ?? '',
+    authMode: account.authMode ?? 'token', accessToken: '', cookie: '', password: '',
     quotaPerUnit: account.quotaPerUnit ?? 500000, unit: account.unit ?? 'USD',
     enabled: account.enabled ?? true, checkinEnabled: account.checkinEnabled ?? true,
     scheduleEnabled: account.schedule?.enabled ?? false,
     scheduleTime: account.schedule?.time ?? '09:00',
     scheduleTimeZone: account.schedule?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC',
-    clearAccessToken: false, clearCookie: false,
+    clearAccessToken: false, clearCookie: false, clearPassword: false,
   };
 }
 
 export function accountPayload(values) {
-  const { clearAccessToken, clearCookie, scheduleEnabled = false, scheduleTime = '09:00', scheduleTimeZone = 'UTC', ...raw } = values;
-  const account = { ...raw, quotaPerUnit: Number(raw.quotaPerUnit), schedule: { enabled: scheduleEnabled, time: scheduleTime, timeZone: scheduleTimeZone } };
+  const { clearAccessToken, clearCookie, clearPassword, scheduleEnabled = false, scheduleTime = '09:00', scheduleTimeZone = 'UTC', ...raw } = values;
+  const account = { ...raw, siteType: raw.siteType === 'agentrouter' ? 'agentrouter' : 'newapi', username: String(raw.username ?? '').trim(), quotaPerUnit: Number(raw.quotaPerUnit), schedule: { enabled: scheduleEnabled, time: scheduleTime, timeZone: scheduleTimeZone } };
+  if (!account.password) delete account.password;
   const clearSecrets = [];
   if (clearAccessToken) { clearSecrets.push('accessToken'); account.accessToken = ''; }
   if (clearCookie) { clearSecrets.push('cookie'); account.cookie = ''; }
+  if (clearPassword) { clearSecrets.push('password'); account.password = ''; }
   if (!account.id) delete account.id;
   return { account, clearSecrets };
 }
@@ -40,7 +43,7 @@ export function accountSummary(account) {
     deltaRequests: snapshot?.deltaRequests == null ? '—' : String(snapshot.deltaRequests),
     state: !account.enabled ? '已停用' : account.status?.stale ? '缓存读数' : snapshot ? '已更新' : '尚未查询',
     error: account.status?.error ?? '',
-    checkin: labels[account.checkin?.state] ?? account.checkin?.state ?? '尚未签到',
+    checkin: account.checkin?.state === 'unknown' && account.checkin.lastAttemptAt ? '结果未确认' : labels[account.checkin?.state] ?? account.checkin?.state ?? '尚未签到',
     schedule: !account.schedule?.enabled ? '自动签到未开启' : !account.enabled || !account.checkinEnabled
       ? '自动签到已暂停（账号或签到已停用）' : `每天 ${account.schedule.time} · ${account.schedule.timeZone}`,
     reward: amount(account.checkin?.reward), reset: snapshot?.reset ?? false,
@@ -65,8 +68,10 @@ export function normalizedAccountDraft(values = {}, secrets = {}) {
   return {
     id: text(values.id),
     name: text(values.name),
+    siteType: values.siteType === 'agentrouter' ? 'agentrouter' : 'newapi',
     siteUrl: text(values.siteUrl),
     userId: text(values.userId),
+    username: text(values.username),
     authMode: values.authMode === 'cookie' ? 'cookie' : 'token',
     quotaPerUnit: number(values.quotaPerUnit),
     unit: text(values.unit),
@@ -77,7 +82,28 @@ export function normalizedAccountDraft(values = {}, secrets = {}) {
     scheduleTimeZone: text(values.scheduleTimeZone),
     accessToken: secretIntent(values, 'accessToken', 'clearAccessToken', Boolean(secrets.accessToken)),
     cookie: secretIntent(values, 'cookie', 'clearCookie', Boolean(secrets.cookie)),
+    password: secretIntent(values, 'password', 'clearPassword', Boolean(secrets?.password)),
   };
+}
+
+/** Client-side field validation; the backend repeats it authoritatively. */
+export function accountFieldErrors(values = {}, secrets = {}) {
+  const text = (value) => value === null || value === undefined ? '' : String(value).trim();
+  const errors = {};
+  if (!text(values.name)) errors.name = '请填写账号名称';
+  if (!text(values.siteUrl)) errors.siteUrl = '请填写站点地址';
+  const siteType = values.siteType === 'agentrouter' ? 'agentrouter' : 'newapi';
+  const userId = text(values.userId);
+  if (siteType === 'newapi') {
+    if (!/^[1-9]\d*$/.test(userId)) errors.userId = '请填写正整数用户 ID';
+  } else {
+    if (userId && !/^[1-9]\d*$/.test(userId)) errors.userId = '用户 ID 必须为正整数，或留空由登录结果确定';
+    if (!text(values.username)) errors.username = '请填写 AgentRouter 登录用户名';
+    if (!text(values.password) && !values.clearPassword && !secrets?.password) {
+      errors.password = '请填写登录密码；已保存的密码可留空保留';
+    }
+  }
+  return errors;
 }
 
 export function accountDraftDirty(baseline, draft) {
@@ -141,10 +167,11 @@ export async function initializeAccounts() {
   const get = (id) => document.getElementById(id);
   const editor = get('account-editor');
   const history = get('account-history');
-  const controls = { name: 'account-name', siteUrl: 'site-url', userId: 'user-id', authMode: 'auth-mode', accessToken: 'access-token', cookie: 'account-cookie', quotaPerUnit: 'quota-per-unit', unit: 'unit', enabled: 'account-enabled', checkinEnabled: 'checkin-enabled', scheduleEnabled: 'schedule-enabled', scheduleTime: 'schedule-time', scheduleTimeZone: 'schedule-timezone', clearAccessToken: 'clear-token', clearCookie: 'clear-cookie' };
-  const checks = new Set(['enabled', 'checkinEnabled', 'scheduleEnabled', 'clearAccessToken', 'clearCookie']);
-  const fieldIds = { name: 'account-name', siteUrl: 'site-url', userId: 'user-id', authMode: 'auth-mode',
-    accessToken: 'access-token', cookie: 'account-cookie', quotaPerUnit: 'quota-per-unit', unit: 'unit',
+  const controls = { name: 'account-name', siteType: 'site-type', siteUrl: 'site-url', userId: 'user-id', username: 'agent-username', authMode: 'auth-mode', accessToken: 'access-token', cookie: 'account-cookie', password: 'agent-password', quotaPerUnit: 'quota-per-unit', unit: 'unit', enabled: 'account-enabled', checkinEnabled: 'checkin-enabled', scheduleEnabled: 'schedule-enabled', scheduleTime: 'schedule-time', scheduleTimeZone: 'schedule-timezone', clearAccessToken: 'clear-token', clearCookie: 'clear-cookie', clearPassword: 'clear-password' };
+  const checks = new Set(['enabled', 'checkinEnabled', 'scheduleEnabled', 'clearAccessToken', 'clearCookie', 'clearPassword']);
+  const fieldIds = { name: 'account-name', siteUrl: 'site-url', userId: 'user-id', username: 'agent-username',
+    authMode: 'auth-mode', accessToken: 'access-token', cookie: 'account-cookie', password: 'agent-password',
+    quotaPerUnit: 'quota-per-unit', unit: 'unit',
     'schedule.enabled': 'schedule-enabled', 'schedule.time': 'schedule-time', 'schedule.timeZone': 'schedule-timezone' };
   const actionStatus = { refresh: '正在刷新账号余额…', checkin: '正在签到并刷新余额…',
     bind: '正在更新当前连接绑定…', remove: '正在删除账号…' };
@@ -287,8 +314,11 @@ export async function initializeAccounts() {
     syncControls();
   }
   function credentialFields() {
-    get('token-field').hidden = get('auth-mode').value !== 'token' && !editing?.secrets.accessToken;
-    get('cookie-field').hidden = get('auth-mode').value !== 'cookie' && !editing?.secrets.cookie;
+    const agentRouter = get('site-type').value === 'agentrouter';
+    get('agentrouter-fields').hidden = !agentRouter;
+    get('user-id').required = !agentRouter;
+    get('token-field').hidden = get('auth-mode').value !== 'token' && !editing?.secrets?.accessToken;
+    get('cookie-field').hidden = get('auth-mode').value !== 'cookie' && !editing?.secrets?.cookie;
   }
   function scheduleFields() {
     get('schedule-settings').hidden = !get('schedule-enabled').checked;
@@ -302,8 +332,9 @@ export async function initializeAccounts() {
       else get(id).value = values[key];
     }
     get('editor-title').textContent = account ? '编辑站点账号' : '添加站点账号';
-    get('token-state').textContent = account?.secrets.accessToken ? '已保存；留空保留原令牌' : '尚未保存系统访问令牌';
-    get('cookie-state').textContent = account?.secrets.cookie ? '已保存；留空保留原 Cookie' : '尚未保存 Cookie';
+    get('token-state').textContent = account?.secrets?.accessToken ? '已保存；留空保留原令牌' : '尚未保存系统访问令牌';
+    get('cookie-state').textContent = account?.secrets?.cookie ? '已保存；留空保留原 Cookie' : '尚未保存 Cookie';
+    get('agent-password-state').textContent = account?.secrets?.password ? '已保存；留空保留原密码' : '尚未保存登录密码';
     error('', true);
     clearFieldErrors();
     credentialFields(); scheduleFields();
@@ -364,7 +395,7 @@ export async function initializeAccounts() {
     }));
     get('account-list').replaceChildren(...accounts.map((account) => {
       const row = element('tr'); const view = accountSummary(account);
-      const identity = element('td'); identity.append(element('strong', account.name), element('div', `${account.siteUrl} · ID ${account.userId}`, 'detail'), element('span', view.state, `account-state${account.status?.stale ? ' stale' : ''}`));
+      const identity = element('td'); identity.append(element('strong', account.name), element('div', `${account.siteType === 'agentrouter' ? 'AgentRouter' : 'New API'} · ${account.siteUrl} · ID ${account.userId || (account.siteType === 'agentrouter' ? '登录后确定' : '—')}`, 'detail'), element('span', view.state, `account-state${account.status?.stale ? ' stale' : ''}`));
       if (view.error) identity.append(element('div', view.error, 'detail'));
       if (data.binding?.selected === account.id) identity.append(element('span', '已选为当前连接', 'account-state'));
       const remaining = element('td'); remaining.append(element('div', view.remaining, 'primary-value'), element('div', view.at, 'detail'));
@@ -458,6 +489,7 @@ export async function initializeAccounts() {
   });
   get('history-close').addEventListener('click', () => history.close());
   get('auth-mode').addEventListener('change', credentialFields);
+  get('site-type').addEventListener('change', credentialFields);
   get('schedule-enabled').addEventListener('change', scheduleFields);
   get('accounts-retry').addEventListener('click', () => { if (!running && !loading) void load(); });
   get('editor-recheck').addEventListener('click', () => { if (!running && !loading) void load(); });
@@ -526,12 +558,9 @@ export async function initializeAccounts() {
     event.preventDefault();
     if (running || unknownOutcome) return;
     const values = fields();
-    const missing = {};
-    if (!values.name.trim()) missing.name = true;
-    if (!values.siteUrl.trim()) missing.siteUrl = true;
-    if (!/^[1-9]\d*$/.test(values.userId)) missing.userId = true;
+    const missing = accountFieldErrors(values, editing?.secrets ?? {});
     if (Object.keys(missing).length) {
-      error('请填写账号名称、站点地址与正整数用户 ID', true);
+      error('请补充或修正标记的字段。', true);
       markFieldErrors(missing);
       return;
     }

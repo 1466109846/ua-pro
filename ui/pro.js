@@ -1,5 +1,5 @@
 import { createTestPlan, createTestSample, validateTestSample } from '../lib/ua-test-plan.mjs'
-import { protocolForModel } from '../lib/ua-protocol.mjs'
+import { protocolForModel, matchesAccountSite } from '../lib/ua-protocol.mjs'
 
 export const PROTOCOLS = ['anthropic', 'responses', 'chat-completions', 'gemini']
 export const OPERATIONS = { anthropic: ['messages', 'count_tokens'], responses: ['responses'], 'chat-completions': ['chat/completions'], gemini: ['generateContent', 'streamGenerateContent', 'countTokens'] }
@@ -30,6 +30,41 @@ export function jsonObject(text, label) {
   return value
 }
 export function lines(text) { return [...new Set(String(text).split(/\r?\n/).map(value => value.trim()).filter(Boolean))] }
+export const ACCOUNT_BINDING_EMPTY = '不绑定签到账号（仅查询 Key 用量）'
+/** Same-site comparison for the optional balance/check-in account binding. */
+export function siteRoot(value) {
+  const text = String(value ?? '').trim().replace(/\/+$/, '')
+  if (!text) return ''
+  return text.replace(/\/v1(?:beta)?$/i, '').replace(/\/+$/, '')
+}
+export function connectionAccountChoices(accounts = [], baseURL = '', selectedId = '') {
+  const list = (Array.isArray(accounts) ? accounts : []).filter(item => item && item.id)
+  const root = siteRoot(baseURL)
+  const matches = item => { try { return matchesAccountSite(baseURL, item) } catch { return false } }
+  const same = root ? list.filter(matches) : []
+  const pool = same.length ? same : list
+  const selected = selectedId === null || selectedId === undefined ? '' : String(selectedId)
+  const selectedAccount = list.find(item => String(item.id) === selected)
+  const choices = pool.map(item => ({
+    value: String(item.id),
+    label: `${item.name ?? item.id} · ${item.siteUrl ?? ''}${item.enabled === false ? '（已停用）' : ''}`,
+  }))
+  const invalid = Boolean(selected && (!selectedAccount || (root !== '' && !matches(selectedAccount))))
+  if (invalid) {
+    const label = selectedAccount
+      ? `当前绑定：${selectedAccount.name} · ${selectedAccount.siteUrl}（属于其他站点或已失效，请重新选择）`
+      : '当前绑定（已失效或属于其他站点，请重新选择）'
+    const existing = choices.findIndex(item => item.value === selected)
+    if (existing >= 0) choices.splice(existing, 1)
+    choices.unshift({ value: selected, label, invalid: true })
+  }
+  return { mode: same.length ? 'same-site' : 'all', choices, selected, invalid }
+}
+export function connectionAccountBindingLabel(accountId, accounts = []) {
+  if (!accountId) return '余额与签到：仅查询 Key 用量（未绑定站点账号）'
+  const account = (Array.isArray(accounts) ? accounts : []).find(item => String(item.id) === String(accountId))
+  return account ? `余额与签到：${account.name} · ${account.siteUrl}` : '余额与签到：绑定账号已失效，请编辑连接重新选择'
+}
 export function fillSelectedModels(current, selected, replace = false) {
   const ids = selected.filter(id => typeof id === 'string' && id.trim()).map(id => id.trim())
   return [...new Set([...(replace ? [] : lines(current)), ...ids])].join('\n')
@@ -131,7 +166,7 @@ export async function requestOperation(fetcher, action, payload, operationId) {
 if (typeof document !== 'undefined') void mount()
 async function mount() {
   const $ = id => document.getElementById(id)
-  let state = { templates: [], connections: [], generation: 0, runtime: {} }
+  let state = { templates: [], connections: [], siteAccounts: [], generation: 0, runtime: {} }
   let view = 'overview', loading = false, pending = null, operation = null
   let connection = null, connectionBaseline = '', template = null, templateBaseline = '', templateOrigin = null
   let migration = null, dirtyConnection = false, dirtyTemplate = false
@@ -237,7 +272,7 @@ async function mount() {
     ].map(([count, label]) => { const item = node('div', undefined, 'metric'); item.append(node('span', label), node('strong', count)); return item }))
     $('overview-empty').hidden = state.connections.length > 0
     $('overview-connections').replaceChildren(...state.connections.map(item => { const row = node('div', undefined, 'overview-item'); const info = node('div'); info.append(node('strong', item.name), node('small', item.baseURL), node('small', bindingLabel(item.binding))); const seen = state.runtime?.observed?.find(entry => entry.connectionId === item.id); row.append(info, tag(seen ? `观察 generation ${seen.generation} · ${seen.templateId ?? '普通转发'} @ ${seen.revision ?? '—'}` : '等待宿主观察')); return row }))
-    $('connection-list').replaceChildren(...state.connections.map(item => { const card = node('article', undefined, 'conn-card'); card.append(node('h3', item.name), tag(item.enabled ? '启用' : '停用'), node('p', `${item.baseURL}\n${item.protocol} · ${item.auth.source === 'host' ? '宿主凭据' : '本地连接凭据'}`), node('p', bindingLabel(item.binding))); const actions = node('div', undefined, 'card-actions'); actions.append(button('编辑', () => editConnection(item)), button('应用模板', () => openBinding([item.id])), button('测试', () => openTest(item.id))); card.append(actions); return card }))
+    $('connection-list').replaceChildren(...state.connections.map(item => { const card = node('article', undefined, 'conn-card'); card.append(node('h3', item.name), tag(item.enabled ? '启用' : '停用'), node('p', `${item.baseURL}\n${item.protocol} · ${item.auth.source === 'host' ? '宿主凭据' : '本地连接凭据'}`), node('p', bindingLabel(item.binding)), node('p', connectionAccountBindingLabel(item.newApiAccountId, state.siteAccounts), 'hint'), (() => { const link = node('a', '管理签到账号 / 补 Cookie 或登录凭据'); link.href = './accounts'; link.addEventListener('click', event => { if (!allowLeave()) event.preventDefault() }); return link })()); const actions = node('div', undefined, 'card-actions'); actions.append(button('编辑', () => editConnection(item)), button('应用模板', () => openBinding([item.id])), button('测试', () => openTest(item.id))); card.append(actions); return card }))
     renderTemplates()
     renderConnectionSelectors()
     $('session-info').replaceChildren(...Object.entries(state.session ?? {}).map(([key, value]) => { const item = node('div'); item.append(node('dt', key), node('dd', value)); return item }))
@@ -275,7 +310,7 @@ async function mount() {
   function connectionDraft() {
     const auth = { ...(connection?.auth ?? { source: 'stored' }), mode: $('conn-auth-mode').value, key: $('conn-key').value, value: $('conn-value').value }
     const result = { ...(connection ? clone(connection) : {}), name: $('conn-name').value.trim(), baseURL: $('conn-base').value.trim(), protocol: $('conn-protocol').value,
-      auth, models: lines($('conn-models').value), modelProtocols: modelProtocolLines($('conn-model-protocols').value), apiPaths: {}, enabled: $('conn-enabled').checked, independent: $('conn-independent').checked, siteId: $('conn-site').value.trim() }
+      auth, models: lines($('conn-models').value), modelProtocols: modelProtocolLines($('conn-model-protocols').value), apiPaths: {}, enabled: $('conn-enabled').checked, independent: $('conn-independent').checked, siteId: $('conn-site').value.trim(), newApiAccountId: $('conn-site-account').value }
     delete result.secrets
     for (const control of document.querySelectorAll('[data-api-path]')) if (control.value.trim()) result.apiPaths[control.dataset.apiPath] = control.value.trim()
     if (!connection) {
@@ -290,7 +325,7 @@ async function mount() {
     $('conn-value-field').hidden = host || mode !== 'custom'
     $('conn-host-note').hidden = !host
     $('conn-auth-mode').disabled = Boolean(host)
-    text('conn-secret-state', host ? '凭据由 Magpie 保存，不会复制到模板。' : connection?.secrets.key || connection?.secrets.value ? '已有凭据；同一目标留空保留。换站需输入新凭据。' : '输入此连接自己的模型凭据。')
+    text('conn-secret-state', host ? '凭据由 Magpie 保存，不会复制到模板。' : connection?.secrets?.key || connection?.secrets?.value ? '已有凭据；同一目标留空保留。换站需输入新凭据。' : '输入此连接自己的模型凭据。')
     $('conn-clear-field').hidden = !connection || host
   }
   function resetModelQuery(message = '使用上方地址、认证方式和密钥读取模型，无需先保存；不会发送生成请求。') {
@@ -323,7 +358,7 @@ async function mount() {
     if (!draft.baseURL) { text('conn-model-status', '请先填写上方站点地址。'); $('conn-base').focus(); return }
     if (draft.auth.source !== 'host' && draft.auth.mode !== 'none') {
       const field = draft.auth.mode === 'custom' ? 'value' : 'key'
-      const saved = connection?.secrets[field] && connection.baseURL.replace(/\/+$/, '') === draft.baseURL.replace(/\/+$/, '') && !$('conn-clear-secret').checked
+      const saved = connection?.secrets?.[field] && connection.baseURL.replace(/\/+$/, '') === draft.baseURL.replace(/\/+$/, '') && !$('conn-clear-secret').checked
       if (!draft.auth[field] && !saved) { text('conn-model-status', '请先填写上方当前站点的密钥或完整 Authorization。'); return }
     }
     resetModelQuery('正在读取模型列表…')
@@ -373,6 +408,16 @@ async function mount() {
     $('conn-models').dispatchEvent(new Event('input', { bubbles: true }))
     text('conn-model-status', `已${replace ? '替换为' : '追加'}选中的 ${selected.length} 个模型；点击“保存连接”才会保存。`)
   }
+  function renderConnectionAccountOptions(selectedId = $('conn-site-account').value) {
+    const result = connectionAccountChoices(state.siteAccounts ?? [], $('conn-base').value, selectedId)
+    options($('conn-site-account'), [['', ACCOUNT_BINDING_EMPTY], ...result.choices.map(item => [item.value, item.label])], result.selected)
+    text('conn-site-account-hint', result.invalid
+      ? '当前绑定已失效或属于其他站点，已保留选项等待重新选择；保存时后端会拒绝无效绑定。'
+      : result.mode === 'same-site'
+        ? '仅列出与该连接站点根地址相同的账号；只影响余额与签到，不改变模型请求和凭据。'
+        : '未找到同站点账号，暂显示全部；保存时后端仍会校验站点根地址一致。')
+    return result
+  }
   function editConnection(item = null) {
     if (!allowLeave()) return
     resetModelQuery()
@@ -382,6 +427,7 @@ async function mount() {
     text('connection-form-title', item ? '编辑连接' : '添加连接')
     for (const [id, value] of Object.entries({ 'conn-name': item?.name ?? '', 'conn-base': item?.baseURL ?? '', 'conn-protocol': item?.protocol ?? 'auto', 'conn-auth-mode': item?.auth.mode ?? 'api-key', 'conn-key': '', 'conn-value': '', 'conn-models': (item?.models ?? []).join('\n'), 'conn-model-protocols': Object.entries(item?.modelProtocols ?? {}).map(([key, value]) => `${key} = ${value}`).join('\n'), 'conn-site': item?.siteId ?? '' })) $(id).value = value
     $('conn-enabled').checked = item?.enabled !== false; $('conn-independent').checked = Boolean(item?.independent); $('conn-clear-secret').checked = false
+    renderConnectionAccountOptions(item?.newApiAccountId ?? '')
     for (const control of document.querySelectorAll('[data-api-path]')) control.value = item?.apiPaths?.[control.dataset.apiPath] ?? ''
     $('connection-remove').hidden = !item; $('conn-binding-field').hidden = Boolean(item); $('conn-binding-note').hidden = !item
     $('conn-binding').value = 'auto'; text('connection-form-error', ''); updateAuthFields()
@@ -725,6 +771,7 @@ async function mount() {
   $('pro-close').addEventListener('click', async () => { if (!allowLeave()) return; await fetch('./api/cancel', { method:'POST',headers:{'content-type':'application/json'},body:'{}' }); document.body.replaceChildren(node('main','配置已关闭。此前保存的更改已保留。','empty')) })
   $('connection-form').addEventListener('input', () => { try { dirtyConnection = JSON.stringify(connectionDraft()) !== connectionBaseline } catch { dirtyConnection = true } text('connection-form-state',dirtyConnection ? '未保存' : '无修改') })
   $('conn-auth-mode').addEventListener('change',updateAuthFields)
+  $('conn-base').addEventListener('input',()=>{if(!$('connection-form').hidden)renderConnectionAccountOptions()})
   $('conn-model-fetch').addEventListener('click', () => { void fetchConnectionModels() })
   $('conn-model-cancel').addEventListener('click', () => resetModelQuery('已取消获取，手填内容保留。'))
   $('conn-model-all').addEventListener('click', () => { for (const option of $('conn-model-options').options) option.selected = true })

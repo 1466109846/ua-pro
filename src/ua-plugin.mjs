@@ -12,7 +12,8 @@ import { createProfileStore } from './store.mjs'
 import { createAccountManager } from './accounts.mjs'
 import { ensureCheckinScheduler } from './scheduler.mjs'
 import { isDeepStrictEqual } from 'node:util'
-import { createPlugin as createLegacyPlugin } from './plugin.mjs'
+import { createUAUsage } from './ua-usage.mjs'
+import { createKeyUsage } from './key-usage.mjs'
 import { resolveProfilePath } from './runtime.mjs'
 
 const PREFIX = 'ua-pro:connection:'
@@ -129,7 +130,12 @@ export async function createUAPlugin(input = {}, options = {}, dependencies = {}
         } finally { if (stop) signal.removeEventListener('abort', stop); await session.close() }
       } }
   }
-  const usageHooks = await createLegacyPlugin({ ...input, magpie: undefined }, { profileFile: legacyStore.path, ...(options.accountBindings ? { accountBindings: options.accountBindings } : {}) }, { store: legacyStore, accountManager })
+  const resolveAccount = async auth => {
+    const matches = Object.entries(await auths()).filter(([slot, saved]) => (slot === id || slot.startsWith(id + '#')) && isDeepStrictEqual(saved, auth))
+    return matches.length === 1 ? matches[0][0] : null
+  }
+  const usageHooks = createUAUsage({ providerId: id, input, options, accountManager, getConnection: getNativeConnection, resolveAccount,
+    queryKeyUsage: (connection, auth) => createKeyUsage({ fetchImpl, readAuth: executeWithAuth(auth, connection) })(connection) })
   return {
     async config(config) {
       const snapshot = await store.snapshot({ secrets: true })
@@ -162,8 +168,8 @@ export async function createUAPlugin(input = {}, options = {}, dependencies = {}
             return transport(url, { ...init, headers })
           } }
       },
-      usage: usageHooks.auth.usage,
-      checkin: usageHooks.auth.checkin,
+      usage: usageHooks.usage,
+      checkin: usageHooks.checkin,
     },
     provider: { id, async models(provider = {}, { auth } = {}) {
       const connection = await getNativeConnection(auth, provider)

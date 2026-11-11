@@ -7,7 +7,7 @@ const schedulers = new Map();
 
 function identityOf(account) {
   const url = new URL(account.siteUrl);
-  return `${url.origin}${url.pathname.replace(/\/+$/, '')}\n${account.userId}`;
+  return `${url.origin}${url.pathname.replace(/\/+$/, '')}\n${account.userId || `username:${account.username}`}`;
 }
 
 export function createCheckinScheduler({
@@ -78,7 +78,7 @@ export function createCheckinScheduler({
         if (!occurrence) return false;
         const identity = identityOf(account);
         if (accounts.some((other) => {
-          const checkedAt = Date.parse(other.checkin?.checkedAt);
+          const checkedAt = Date.parse(other.checkin?.lastAttemptAt ?? other.checkin?.checkedAt);
           return Number.isFinite(checkedAt) && identityOf(other) === identity && scheduleDate(checkedAt, occurrence.timeZone) === occurrence.date;
         })) return false;
         if (identities.has(identity)) return false;

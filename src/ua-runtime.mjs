@@ -18,7 +18,7 @@ export function operationForURL(input) {
   throw err('请求路径不是支持的模型操作')
 }
 
-async function credential(connection, readAuth) {
+export async function credential(connection, readAuth) {
   let auth = connection.auth ?? {}
   if (auth.source === 'host') {
     const current = await readAuth?.(auth.provider, auth.account)

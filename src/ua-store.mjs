@@ -149,7 +149,7 @@ function normalizeModelBindings(raw) {
 
 function normalizeConnectionShape(raw) {
   if (!isObject(raw)) throw fail('连接必须是对象', 400, 'connection');
-  onlyKeys(raw, ['id', 'name', 'enabled', 'revision', 'siteId', 'independent', 'baseURL', 'protocol', 'apiPaths', 'modelProtocols', 'models', 'auth', 'binding', 'modelBindings', 'secrets'], 'connection');
+  onlyKeys(raw, ['id', 'name', 'enabled', 'revision', 'siteId', 'independent', 'baseURL', 'protocol', 'apiPaths', 'modelProtocols', 'models', 'auth', 'binding', 'modelBindings', 'secrets', 'newApiAccountId'], 'connection');
   let id;
   if (raw.id !== undefined && raw.id !== '') {
     if (!isText(raw.id) || !STABLE_ID.test(raw.id.trim())) throw fail('连接 id 无效', 400, 'id');
@@ -214,10 +214,13 @@ function normalizeConnectionShape(raw) {
 
   const binding = raw.binding === undefined ? undefined : normalizeBinding(raw.binding);
   const modelBindings = raw.modelBindings === undefined ? {} : normalizeModelBindings(raw.modelBindings);
+  const newApiAccountId = raw.newApiAccountId;
+  if (newApiAccountId !== undefined && (typeof newApiAccountId !== 'string' || newApiAccountId.length > 200 || /[\x00-\x1f\x7f-\x9f]/.test(newApiAccountId))) throw fail('余额与签到账号绑定无效', 400, 'newApiAccountId');
 
   return {
     id, name: raw.name.trim(), enabled, revision, siteId, independent, baseURL, protocol,
     apiPaths, modelProtocols, models: [...modelsRaw], auth, binding, modelBindings,
+    ...(newApiAccountId !== undefined ? { newApiAccountId: newApiAccountId.trim() } : {}),
   };
 }
 

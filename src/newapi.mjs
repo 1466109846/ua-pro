@@ -23,6 +23,7 @@ const ERRORS = Object.freeze({
   size: '站点响应超过允许大小。',
   identity: '站点返回的用户 ID 与配置不一致，已停止操作。',
   credentials: '请填写所选认证方式对应的系统访问令牌或 Cookie。',
+  login_credentials: '请填写 AgentRouter 用户名和密码。',
   disabled: '该账号或签到功能未启用。',
   checkin: '签到未完成，请前往站点检查签到条件。',
   cookie_required: '当前令牌缺少签到权限或站点要求登录 Cookie，请检查令牌权限或改用 Cookie。',
@@ -31,16 +32,33 @@ const ERRORS = Object.freeze({
 });
 
 export class NewApiError extends Error {
-  constructor(code = 'network') {
+  constructor(code = 'network', status = null) {
     super(ERRORS[code] ?? ERRORS.network);
     this.name = 'NewApiError';
     this.code = Object.hasOwn(ERRORS, code) ? code : 'network';
+    this.status = Number.isInteger(status) ? status : null;
   }
 }
 
 /** Only fixed local messages cross the network/client boundary. */
 export function safeNewApiMessage(error) {
   return error instanceof NewApiError ? ERRORS[error.code] ?? ERRORS.network : ERRORS.network;
+}
+
+/** Keep only the site's session cookie pair; never persist unrelated Set-Cookie values. */
+function sessionCookie(headers) {
+  const combined = headers.get('set-cookie');
+  const values = typeof headers.getSetCookie === 'function'
+    ? headers.getSetCookie()
+    : combined ? combined.split(/,(?=\s*[^;=,\s]+=)/u) : [];
+  for (const value of values) {
+    const pair = String(value).split(';')[0].trim();
+    const separator = pair.indexOf('=');
+    if (separator <= 0 || pair.slice(0, separator).trim().toLowerCase() !== 'session') continue;
+    if (CONTROL.test(pair) || pair.length > 32768) continue;
+    return pair;
+  }
+  return null;
 }
 
 /** Whitelist the account config; no model-router headers are accepted here. */
@@ -59,18 +77,25 @@ export function normalizeAccountConfig(raw = {}) {
     if (raw[key] !== undefined && typeof raw[key] !== 'boolean') fields[key] = '必须为开关值。';
     return raw[key] === undefined ? true : raw[key] === true;
   }
+  const siteType = text('siteType', 'newapi', 16);
+  if (!['newapi', 'agentrouter'].includes(siteType)) fields.siteType = '请选择 New API 或 AgentRouter。';
   let siteUrl = text('siteUrl', '', 2048);
   try {
     const url = new URL(siteUrl);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || siteUrl.includes('?') || siteUrl.includes('#') || siteUrl.includes('\\') || /%(?:0[0-9a-f]|1[0-9a-f]|7f)/iu.test(siteUrl)) throw new Error();
+    const loopback = /^127(?:\.\d{1,3}){3}$/u.test(url.hostname) || ['localhost', '::1', '[::1]'].includes(url.hostname.toLowerCase());
     siteUrl = url.href.replace(/\/+$/u, '');
+    if (siteType === 'agentrouter' && url.protocol === 'http:' && !loopback) fields.siteUrl = 'AgentRouter 必须使用 HTTPS 或本机回环地址。';
   } catch { fields.siteUrl = '请输入不含账号、密码、查询参数或片段的 HTTP(S) 站点地址。'; }
   const userId = text('userId', '', 32);
-  if (!/^[1-9]\d*$/u.test(userId)) fields.userId = '用户 ID 必须为正整数字符串。';
-  const name = text('name', 'New API', 100);
+  if (siteType === 'newapi' && !/^[1-9]\d*$/u.test(userId) || siteType === 'agentrouter' && userId && !/^[1-9]\d*$/u.test(userId)) fields.userId = '用户 ID 必须为正整数字符串。';
+  const name = text('name', siteType === 'agentrouter' ? 'AgentRouter' : 'New API', 100);
   if (!name) fields.name = '请输入账号名称。';
   const authMode = text('authMode', 'token', 16);
   if (!['token', 'cookie'].includes(authMode)) fields.authMode = '请选择令牌或 Cookie 认证。';
+  const username = text('username', '', 256);
+  const password = raw.password ?? '';
+  if (typeof password !== 'string' || CONTROL.test(password) || password.length > 4096) fields.password = '请输入不含控制字符且长度合理的密钥。';
   const accessToken = text('accessToken', '', 16384);
   const cookie = text('cookie', '', 32768);
   const quotaPerUnit = raw.quotaPerUnit ?? 500000;
@@ -92,23 +117,37 @@ export function normalizeAccountConfig(raw = {}) {
     for (const field of Object.keys(error.fields)) fields[field] = messages[field] ?? messages.schedule;
   }
   if (Object.keys(fields).length) throw new AccountValidationError('账号配置无效。', 400, fields);
-  return { name, enabled, siteUrl, userId, authMode, accessToken, cookie, quotaPerUnit, unit, checkinEnabled, schedule };
+  return { name, enabled, siteUrl, siteType, userId, username, password, authMode, accessToken, cookie, quotaPerUnit, unit, checkinEnabled, schedule };
 }
 
 export function createNewApiClient({ fetchImpl = globalThis.fetch, now = () => new Date() } = {}) {
   if (typeof fetchImpl !== 'function') throw new AccountValidationError('缺少网络请求实现。');
   const timestamp = () => new Date(now()).toISOString();
 
-  async function request(account, endpoint, { method = 'GET', body } = {}) {
+  async function request(account, endpoint, { method = 'GET', body, accountAuth = true, cookieJar } = {}) {
     const url = new URL(`${account.siteUrl}${endpoint}`);
     if (url.origin !== new URL(account.siteUrl).origin) throw new NewApiError('redirect');
-    const headers = { Accept: 'application/json', 'New-Api-User': account.userId };
-    if (account.authMode === 'token') {
-      if (!account.accessToken) throw new NewApiError('credentials');
-      headers.Authorization = `Bearer ${account.accessToken}`;
-    } else {
-      if (!account.cookie) throw new NewApiError('credentials');
-      headers.Cookie = account.cookie;
+    const headers = { Accept: 'application/json' };
+    if (accountAuth) {
+      if (account.siteType === 'agentrouter') {
+        if (account.userId) headers['New-Api-User'] = account.userId;
+        if (account.authMode === 'token') {
+          if (!account.accessToken) throw new NewApiError('credentials');
+          headers.Authorization = account.accessToken;
+        } else {
+          if (!account.cookie) throw new NewApiError('credentials');
+          headers.Cookie = account.cookie;
+        }
+      } else {
+        headers['New-Api-User'] = account.userId;
+        if (account.authMode === 'token') {
+          if (!account.accessToken) throw new NewApiError('credentials');
+          headers.Authorization = `Bearer ${account.accessToken}`;
+        } else {
+          if (!account.cookie) throw new NewApiError('credentials');
+          headers.Cookie = account.cookie;
+        }
+      }
     }
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     const controller = new AbortController();
@@ -124,11 +163,15 @@ export function createNewApiClient({ fetchImpl = globalThis.fetch, now = () => n
     try {
       return await Promise.race([deadline, (async () => {
         const response = await fetchImpl(url.href, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual', credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal });
-        const rejectResponse = code => { void response.body?.cancel().catch(() => {}); throw new NewApiError(code); };
+        const rejectResponse = (code, status = response.status) => { void response.body?.cancel().catch(() => {}); throw new NewApiError(code, status); };
         if (response.redirected || response.status >= 300 && response.status < 400 || response.url && new URL(response.url).origin !== url.origin) rejectResponse('redirect');
         if (response.status === 401 || response.status === 403) rejectResponse('auth');
         if (!response.ok) rejectResponse('http');
         if (Number(response.headers.get('content-length')) > RESPONSE_LIMIT) rejectResponse('size');
+        if (cookieJar && typeof cookieJar === 'object') {
+          const cookie = sessionCookie(response.headers);
+          if (cookie) cookieJar.cookie = cookie;
+        }
         if (!response.body?.getReader) throw new NewApiError('response');
         reader = response.body.getReader();
         const chunks = []; let size = 0;
@@ -151,8 +194,24 @@ export function createNewApiClient({ fetchImpl = globalThis.fetch, now = () => n
     } finally { clearTimeout(timer); }
   }
 
+  async function agentRouterBalance(account) {
+    if (!/^[1-9]\d*$/u.test(account.userId)) throw new NewApiError('identity');
+    if (account.authMode === 'token' ? !account.accessToken : !account.cookie) throw new NewApiError('credentials');
+    const result = await request(account, '/api/user/self');
+    if (result.success !== true || !result.data || typeof result.data !== 'object') throw new NewApiError('response');
+    const data = result.data;
+    const id = typeof data.id === 'number' && Number.isSafeInteger(data.id) ? String(data.id)
+      : typeof data.id === 'string' && /^[1-9]\d*$/u.test(data.id) ? data.id : null;
+    if (!id || id !== account.userId) throw new NewApiError('identity');
+    if (!Number.isSafeInteger(data.quota) || !Number.isSafeInteger(data.used_quota) || data.used_quota < 0) throw new NewApiError('response');
+    const requestCount = data.request_count === undefined || data.request_count === null ? 0 : data.request_count;
+    if (!Number.isSafeInteger(requestCount) || requestCount < 0) throw new NewApiError('response');
+    return { at: timestamp(), quota: data.quota, usedQuota: data.used_quota, requestCount };
+  }
+
   async function balance(raw) {
     const account = normalizeAccountConfig(raw);
+    if (account.siteType === 'agentrouter') return agentRouterBalance(account);
     const result = await request(account, '/api/user/self');
     if (result.success !== true || !result.data || typeof result.data !== 'object') throw new NewApiError('response');
     const data = result.data;
@@ -162,9 +221,43 @@ export function createNewApiClient({ fetchImpl = globalThis.fetch, now = () => n
     return { at: timestamp(), quota: data.quota, usedQuota: data.used_quota, requestCount: data.request_count };
   }
 
+  async function agentRouterCheckin(account) {
+    if (!account.username || !account.password) throw new NewApiError('login_credentials');
+    const cookieJar = {};
+    let result;
+    try {
+      result = await request(account, '/api/user/login', {
+        method: 'POST',
+        body: { username: account.username, password: account.password },
+        accountAuth: false,
+        cookieJar,
+      });
+    } catch (error) {
+      if (!(error instanceof NewApiError)) throw new NewApiError('ambiguous');
+      if (['credentials', 'identity', 'redirect', 'auth'].includes(error.code)) throw error;
+      // A 4xx response is a definite rejection; a 5xx/body/transport failure may
+      // have happened after the site completed the login.
+      if (error.code === 'http' && Number.isInteger(error.status) && error.status >= 400 && error.status < 500) {
+        throw new NewApiError('checkin', error.status);
+      }
+      throw new NewApiError('ambiguous', error.status);
+    }
+    if (result.success === false) throw new NewApiError('checkin');
+    if (result.success !== true) throw new NewApiError('ambiguous');
+    if (!result.data || typeof result.data !== 'object') throw new NewApiError('ambiguous');
+    const data = result.data;
+    if (typeof data.id !== 'number' || !Number.isSafeInteger(data.id) || data.id <= 0) throw new NewApiError('identity');
+    const discovered = String(data.id);
+    if (account.userId && account.userId !== discovered) throw new NewApiError('identity');
+    if (data.checked_in !== undefined && data.checked_in !== true && data.checked_in !== false) throw new NewApiError('ambiguous');
+    return { state: data.checked_in === true ? 'success' : 'already', date: null, rewardQuota: null,
+      userId: discovered, cookie: cookieJar.cookie, authenticated: true };
+  }
+
   async function checkin(raw, { turnstileToken } = {}) {
     const account = normalizeAccountConfig(raw);
     if (!account.enabled || !account.checkinEnabled) throw new NewApiError('disabled');
+    if (account.siteType === 'agentrouter') return agentRouterCheckin(account);
     if (turnstileToken !== undefined && (typeof turnstileToken !== 'string' || CONTROL.test(turnstileToken) || turnstileToken.length > 4096)) throw new AccountValidationError('验证码参数无效。');
     await balance(account);
     const site = await request(account, '/api/status');
