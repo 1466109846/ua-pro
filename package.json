@@ -1,7 +1,10 @@
 {
   "name": "opencode-claude-code-ua",
   "version": "0.3.6",
-  "private": true,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "description": "UA PRO: versioned Codex and Claude compatibility templates, multi-protocol connections, previews and explicit upstream tests",
   "license": "MIT",
   "repository": {
