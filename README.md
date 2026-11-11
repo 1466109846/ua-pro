@@ -4,7 +4,7 @@
 
 npm 包名：[`opencode-claude-code-ua`](https://www.npmjs.com/package/opencode-claude-code-ua)。供应商 ID：`ua-pro`。无 npm 运行依赖。
 
-> 当前源码版本为 **0.3.7**，npm 尚未发布此版本。宿主余额与签到增强需使用本版本源码；通过 npm 安装获取的是当前已发布版本。
+> 当前源码版本为 **0.3.8**，npm 尚未发布此版本。宿主余额与签到增强需使用本版本源码；通过 npm 安装获取的是当前已发布版本。
 
 ## 安装与打开管理页
 

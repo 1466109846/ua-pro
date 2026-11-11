@@ -169,7 +169,7 @@ async function mount() {
   let state = { templates: [], connections: [], siteAccounts: [], generation: 0, runtime: {} }
   let view = 'overview', loading = false, pending = null, operation = null
   let connection = null, connectionBaseline = '', template = null, templateBaseline = '', templateOrigin = null
-  let migration = null, dirtyConnection = false, dirtyTemplate = false
+  let dirtyConnection = false, dirtyTemplate = false
   let modelQuery = null, modelQueryReady = false, modelResultShown = false
   let testModelQuery = null, testModels = [], testCatalog = null, testConnectionID = '', testConnectionRevision, testModelManual = false, testSampleBaseline = '', testProtocolExplicit = false
   let testSelectionInitialized = false
@@ -870,8 +870,6 @@ async function mount() {
     catch{showError('未收到取消确认，请查询原操作，不要重复发送')}
     finally{if(!loading){$('test-cancel').disabled=false;text('test-cancel','取消测试')}}
   })
-  $('migration-preview').addEventListener('click',()=>run('migration/preview',{},data=>{migration=data;$('migration-result').replaceChildren(node('pre',JSON.stringify(data,null,2),'code-block'));$('migration-apply').hidden=!data.available}))
-  $('migration-apply').addEventListener('click',()=>{if(migration?.available&&window.confirm('复制旧 Claude 配置为 UA PRO 新连接？原配置不变。'))void run('migration/apply',{fingerprint:migration.fingerprint},()=>{$('migration-apply').hidden=true})})
   window.addEventListener('beforeunload',event=>{if(isDirty()||locked()){event.preventDefault();event.returnValue=''}})
   try { await refresh();navigate(location.hash.slice(1)||'overview',true);testFields();resetSample();$('pro-shell').dataset.ready='true';status('配置已读取。保存版本与应用连接分别执行。') } catch(error){showError(error);status('无法读取 UA PRO 配置')}
 }
