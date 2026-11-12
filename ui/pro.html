@@ -115,6 +115,7 @@
                 <label class="field" id="conn-site-field">站点 ID<input id="conn-site" maxlength="64" spellcheck="false" placeholder="main"></label>
                 <p class="hint">新增独立供应商保存后需重载 UA PRO 插件，再到 Magpie 供应商列表查看。</p>
                 <label class="field" id="conn-site-account-field">余额与签到账号<select id="conn-site-account"><option value="">不绑定签到账号（仅查询 Key 用量）</option></select></label>
+                <div class="row-actions conn-account-open-row"><button id="conn-account-open" type="button" class="ghost" aria-haspopup="dialog">在此添加 Cookie / 令牌（可选）</button></div>
                 <p id="conn-site-account-hint" class="hint">绑定只影响余额与签到，不复制凭据，也不改变模型请求；保存时按站点根地址校验。</p>
                 <p class="hint"><a id="conn-accounts-link" href="./accounts">管理签到账号</a>：补 Cookie、用户名或密码等凭据；旧绑定失效时会保留选项并提示重新选择。</p>
                 <label class="field" id="conn-binding-field">初始模板绑定<select id="conn-binding"></select></label>
@@ -326,6 +327,32 @@
       </section>
     </main>
   </div>
+
+  <dialog id="conn-account-dialog" class="dialog" aria-labelledby="conn-account-title">
+    <form id="conn-account-form" novalidate>
+      <h2 id="conn-account-title">添加站点账号</h2>
+      <p class="hint">仅保存余额与签到所需的站点账号；不读取或复制连接的模型 Key，不会自动登录、刷新或签到。</p>
+      <div class="grid2">
+        <label class="field">账号名称<input id="ca-name" maxlength="100" autocomplete="off" required></label>
+        <label class="field">站点地址（只读）<input id="ca-site" readonly></label>
+      </div>
+      <div class="grid2">
+        <label class="field">站点类型<select id="ca-site-type"><option value="newapi">NewAPI</option><option value="agentrouter">AgentRouter</option></select></label>
+        <label class="field">数字用户 ID<input id="ca-user-id" inputmode="numeric" autocomplete="off" placeholder="NewAPI 必填；AgentRouter 可留空"></label>
+      </div>
+      <div class="grid2">
+        <label class="field">认证方式<select id="ca-auth-mode"><option value="cookie">Cookie（推荐）</option><option value="token">系统访问令牌</option></select></label>
+        <label class="field"><span id="ca-credential-label">Cookie</span><input id="ca-credential" type="password" autocomplete="new-password" spellcheck="false"></label>
+      </div>
+      <div id="ca-agentrouter-fields" class="grid2" hidden>
+        <label class="field">AgentRouter 登录用户名<input id="ca-username" autocomplete="username" spellcheck="false"></label>
+        <label class="field">AgentRouter 登录密码<input id="ca-password" type="password" autocomplete="new-password" spellcheck="false"></label>
+      </div>
+      <p class="hint">默认启用并允许签到，额度倍率为 500000 quota / USD；定时安排和倍率调整请到“余额与签到”独立页面。创建后只会选入连接草稿，仍需点击“保存连接”才会绑定。</p>
+      <p id="conn-account-error" class="form-error" role="alert"></p>
+      <div class="form-actions"><button id="ca-recover" type="button" class="ghost" hidden>查询账号保存结果</button><span class="spacer"></span><button id="ca-cancel" type="button" class="ghost">取消</button><button id="ca-save" type="submit" class="primary">仅创建站点账号</button></div>
+    </form>
+  </dialog>
 
   <dialog id="template-base-dialog" class="dialog" aria-labelledby="template-base-title">
     <form id="template-base-form" method="dialog" novalidate>

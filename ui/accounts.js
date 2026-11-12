@@ -783,4 +783,4 @@ export async function initializeAccounts() {
   await load();
 }
 
-if (typeof document !== 'undefined') void initializeAccounts();
+if (typeof document !== 'undefined' && document.getElementById('account-editor')) void initializeAccounts();

@@ -1,5 +1,6 @@
 import { createTestPlan, createTestSample, validateTestSample } from '../lib/ua-test-plan.mjs'
 import { protocolForModel, matchesAccountSite } from '../lib/ua-protocol.mjs'
+import { accountValues, accountPayload, accountFieldErrors, normalizedAccountDraft, accountDraftDirty } from './accounts.js'
 
 export const PROTOCOLS = ['anthropic', 'responses', 'chat-completions', 'gemini']
 export const OPERATIONS = { anthropic: ['messages', 'count_tokens'], responses: ['responses'], 'chat-completions': ['chat/completions'], gemini: ['generateContent', 'streamGenerateContent', 'countTokens'] }
@@ -42,6 +43,45 @@ export function siteRoot(value) {
   const text = String(value ?? '').trim().replace(/\/+$/, '')
   if (!text) return ''
   return text.replace(/\/v1(?:beta)?$/i, '').replace(/\/+$/, '')
+}
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
+function accountSiteRoot(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return ''
+  let url
+  try {
+    url = new URL(raw)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return ''
+    if (raw.includes('\\') || /%(?:0[0-9a-f]|1[0-9a-f]|7f)/iu.test(raw)) return ''
+    if (url.protocol === 'http:' && !LOOPBACK_HOSTS.has(url.hostname.toLowerCase())) return ''
+    return siteRoot(url.href)
+  } catch {
+    return ''
+  }
+}
+/** Prefill for the optional connection account; the model auth material is never read. */
+export function connectionAccountValues(connection = {}) {
+  const baseURL = String(connection?.baseURL ?? '').trim()
+  const siteUrl = accountSiteRoot(baseURL)
+  let hostname = ''
+  if (siteUrl) {
+    try { hostname = new URL(siteUrl).hostname } catch {}
+  }
+  const name = siteUrl ? String(connection?.name ?? '').trim().slice(0, 100) || hostname : ''
+  return { ...accountValues({ name, siteUrl, siteType: 'newapi', authMode: 'cookie' }), siteUrl, siteValid: Boolean(siteUrl) }
+}
+/** Client-side checks for the inline form; the backend repeats them authoritatively. */
+export function connectionAccountErrors(values = {}) {
+  const errors = { ...accountFieldErrors(values) }
+  if (!errors.siteUrl && values.siteUrl && !accountSiteRoot(values.siteUrl)) errors.siteUrl = '请输入不含凭据、查询或片段的 HTTP(S) 站点根地址'
+  if ((values.siteType === 'agentrouter' ? 'agentrouter' : 'newapi') === 'newapi') {
+    const token = values.authMode === 'token'
+    const credential = token ? values.accessToken : values.cookie
+    if (!String(credential ?? '').trim()) {
+      errors[token ? 'accessToken' : 'cookie'] ||= token ? '请填写此站点账号的系统访问令牌' : '请填写此站点账号的登录 Cookie'
+    }
+  }
+  return errors
 }
 export function connectionAccountChoices(accounts = [], baseURL = '', selectedId = '') {
   const list = (Array.isArray(accounts) ? accounts : []).filter(item => item && item.id)
@@ -248,6 +288,7 @@ export function sessionRows(session) {
 }
 const FIELD_TARGETS = {
   'connections/save': { name: 'conn-name', baseURL: 'conn-base', auth: 'conn-auth-mode', protocol: 'conn-protocol', models: 'conn-models', modelProtocols: 'conn-model-protocols', apiPaths: 'conn-protocol', siteId: 'conn-site', independent: 'conn-independent', enabled: 'conn-enabled', newApiAccountId: 'conn-site-account', binding: 'conn-binding' },
+  'connection-accounts/save': { name: 'ca-name', siteUrl: 'ca-site', siteType: 'ca-site-type', userId: 'ca-user-id', username: 'ca-username', authMode: 'ca-auth-mode', accessToken: 'ca-credential', cookie: 'ca-credential', password: 'ca-password' },
   'templates/save': { name: 'tpl-name' },
 }
 /** The form control a server-side field error belongs to, or '' when the form has none. */
@@ -277,6 +318,7 @@ async function mount() {
   let view = 'overview', loading = false, pending = null, operation = null
   let connection = null, connectionBaseline = '', template = null, templateBaseline = '', templateOrigin = null
   let dirtyConnection = false, dirtyTemplate = false
+  let dirtyConnectionAccount = false, connectionAccountBaseline = null, connectionAccountBaseURL = '', connectionAccountSaving = false
   let modelQuery = null, modelQueryReady = false, modelResultShown = false
   let testModelQuery = null, testModels = [], testCatalog = null, testConnectionID = '', testConnectionRevision, testModelManual = false, testSampleBaseline = '', testProtocolExplicit = false
   let testSelectionInitialized = false
@@ -289,7 +331,7 @@ async function mount() {
   const status = value => text('pro-status', value)
   const showError = error => { $('pro-error').hidden = !error; $('pro-error').textContent = error ? String(error.message ?? error) : '' }
   // Operations started from a form report back inside that form, next to the button the user pressed.
-  const FORM_ERRORS = { 'connections/save': 'connection-form-error', 'connections/remove': 'connection-form-error', 'bindings/apply': 'binding-error', 'templates/save': 'tpl-error', 'templates/remove': 'history-error' }
+  const FORM_ERRORS = { 'connections/save': 'connection-form-error', 'connections/remove': 'connection-form-error', 'connection-accounts/save': 'conn-account-error', 'bindings/apply': 'binding-error', 'templates/save': 'tpl-error', 'templates/remove': 'history-error' }
   function revealPanel(panel, focusTarget) {
     if (!panel || panel.hidden) return
     const box = panel.getBoundingClientRect()
@@ -314,7 +356,7 @@ async function mount() {
     clearFieldErrors(form)
     for (const target of form?.querySelectorAll('.form-error') ?? []) target.textContent = ''
   }
-  function isDirty() { return dirtyTemplate || dirtyConnection || dirtyTestSample }
+  function isDirty() { return dirtyTemplate || dirtyConnection || dirtyTestSample || dirtyConnectionAccount }
   function locked() { return loading || Boolean(pending) || Boolean(modelQuery) }
   function allowLeave() {
     if (locked()) { showError('操作进行中或结果未知，请先确认结果。'); return false }
@@ -328,7 +370,7 @@ async function mount() {
   function setBusy(value) {
     loading = value
     for (const element of document.querySelectorAll('button,input,select,textarea')) {
-      if (element.id === 'pro-recover' || element.id === 'test-cancel') continue
+      if (element.id === 'pro-recover' || element.id === 'test-cancel' || element.id === 'ca-recover') continue
       if (value) { element.dataset.preDisabled = element.disabled ? '1' : '0'; element.disabled = true }
       else if (element.dataset.preDisabled !== undefined) { element.disabled = element.dataset.preDisabled === '1'; delete element.dataset.preDisabled }
     }
@@ -360,9 +402,21 @@ async function mount() {
       status('结果未知，等待查询')
       return
     }
+    if (!result.ok) { operation = null; if (!showFormError(action, result)) showError(operationErrorText(result)); status('操作未完成，草稿保留'); return }
+    try {
+      await refresh()
+    } catch (error) {
+      if (action !== 'connection-accounts/save') throw error
+      pending = operation
+      clearConnectionAccountSecrets()
+      setBusy(true)
+      loading = false
+      $('pro-pending').hidden = false
+      text('pro-pending-text', `账号保存已有响应，但列表刷新未完成。请查询原操作，不要再次创建。操作标识：${pending.id}`)
+      status('等待恢复账号保存结果')
+      return
+    }
     operation = null
-    if (!result.ok) { if (!showFormError(action, result)) showError(operationErrorText(result)); status('操作未完成，草稿保留'); return }
-    await refresh()
     if (complete) await complete(result.data)
     status(action === 'test' ? result.data.result?.status === 'passed' ? '测试完成：通过' : '测试完成：未通过，请查看本次原因' : action === 'connections/save' ? connectionSaveMessage(result.data) : action === 'connections/sync' ? result.data.message || '宿主同步完成，请刷新 Magpie 供应商和模型列表' : action === 'routes/apply' ? '模型路由已保存，请在 Magpie 重新获取模型或重载插件' : result.data.activation ? '已保存绑定；等待宿主后续请求确认使用版本' : '操作完成')
   }
@@ -372,8 +426,17 @@ async function mount() {
       const response = await fetch(`./api/pro/operations?id=${encodeURIComponent(pending.id)}`, { cache: 'no-store' })
       const result = await response.json()
       if (result.state === 'saved') {
-        const done = pending.complete; pending = null; setBusy(false); $('pro-pending').hidden = true
-        await refresh(); if (done) await done(result.result); status('已确认原操作完成')
+        const done = pending.complete
+        if (pending.action === 'connection-accounts/save') {
+          await refresh()
+          pending = null; setBusy(false); $('pro-pending').hidden = true
+          if (done) await done(result.result)
+        } else {
+          pending = null; setBusy(false); $('pro-pending').hidden = true
+          await refresh(); if (done) await done(result.result)
+        }
+        operation = null
+        status('已确认原操作完成')
       } else if (result.state === 'failed') { pending = null; setBusy(false); $('pro-pending').hidden = true; showError(result.error?.error || '原操作已确认失败，可修正后重试') }
       else text('pro-pending-text', '尚不能确认操作结果；请保留草稿并稍后查询，不重复提交。')
     } catch { showError('暂时无法查询结果，请稍后重试') }
@@ -594,6 +657,213 @@ async function mount() {
         ? '仅列出与该连接站点根地址相同的账号；只影响余额与签到，不改变模型请求和凭据。'
         : '未找到同站点账号，暂显示全部；保存时后端仍会校验站点根地址一致。')
     return result
+  }
+  function connectionAccountFormValues() {
+    const base = accountValues({})
+    const siteType = $('ca-site-type').value === 'agentrouter' ? 'agentrouter' : 'newapi'
+    const authMode = $('ca-auth-mode').value === 'token' ? 'token' : 'cookie'
+    const credential = $('ca-credential').value
+    return {
+      ...base,
+      name: $('ca-name').value,
+      siteUrl: $('ca-site').value,
+      siteType,
+      userId: $('ca-user-id').value,
+      username: $('ca-username').value,
+      authMode,
+      accessToken: authMode === 'token' ? credential : '',
+      cookie: authMode === 'cookie' ? credential : '',
+      password: $('ca-password').value,
+      enabled: true,
+      checkinEnabled: true,
+      scheduleEnabled: false,
+      quotaPerUnit: 500000,
+      unit: 'USD',
+      clearAccessToken: false,
+      clearCookie: false,
+      clearPassword: false,
+    }
+  }
+  function updateConnectionAccountDirty() {
+    if (!connectionAccountBaseline) { dirtyConnectionAccount = false; return }
+    dirtyConnectionAccount = accountDraftDirty(connectionAccountBaseline, normalizedAccountDraft(connectionAccountFormValues()))
+  }
+  function updateConnectionAccountAuth() {
+    text('ca-credential-label', $('ca-auth-mode').value === 'token' ? '系统访问令牌' : 'Cookie')
+  }
+  function toggleConnectionAccountType() {
+    const agent = $('ca-site-type').value === 'agentrouter'
+    $('ca-agentrouter-fields').hidden = !agent
+  }
+  function fillConnectionAccountForm(values) {
+    $('ca-name').value = values.name
+    $('ca-site').value = values.siteUrl
+    $('ca-site-type').value = values.siteType
+    $('ca-user-id').value = ''
+    $('ca-auth-mode').value = values.authMode
+    $('ca-credential').value = ''
+    $('ca-username').value = ''
+    $('ca-password').value = ''
+    $('ca-recover').hidden = true
+    text('conn-account-error', '')
+    clearFieldErrors($('conn-account-form'))
+    toggleConnectionAccountType()
+    updateConnectionAccountAuth()
+  }
+  function showConnectionAccountErrors(errors) {
+    clearFieldErrors($('conn-account-form'))
+    const messages = [...new Set(Object.values(errors).filter(Boolean))]
+    text('conn-account-error', messages.length ? messages.join('；') : '请检查站点账号信息')
+    const targets = FIELD_TARGETS['connection-accounts/save']
+    for (const key of Object.keys(errors)) {
+      const control = targets[key] ? $(targets[key]) : null
+      if (control && !control.closest('[hidden]')) control.setAttribute('aria-invalid', 'true')
+    }
+    const first = Object.keys(errors).map(key => targets[key] ? $(targets[key]) : null).find(control => control && !control.closest('[hidden]'))
+    if (first) { first.focus(); first.scrollIntoView({ block: 'center' }) }
+  }
+  function openConnectionAccountDialog() {
+    if ($('conn-account-dialog').open) return
+    if (modelQuery) { showFormError('connections/save', { error: '模型列表正在读取，请取消或等待完成后再添加站点账号。' }); return }
+    if (loading || pending || connectionAccountSaving) { showFormError('connections/save', { error: '操作进行中或结果未知，请稍候后再添加站点账号。' }); return }
+    const baseURL = $('conn-base').value.trim()
+    const values = connectionAccountValues({ name: $('conn-name').value, baseURL })
+    if (!values.siteValid) {
+      showFormError('connections/save', { error: '请先填写有效的 HTTPS 站点地址（本机回环可用 HTTP），无需先保存连接。', fields: { baseURL: '' } })
+      $('conn-base').focus()
+      return
+    }
+    connectionAccountBaseURL = baseURL
+    fillConnectionAccountForm(values)
+    connectionAccountBaseline = normalizedAccountDraft(connectionAccountFormValues())
+    dirtyConnectionAccount = false
+    text('connection-form-error', '')
+    clearFieldErrors($('connection-form'))
+    text('connection-form-status', '')
+    $('conn-account-dialog').showModal()
+  }
+  function clearConnectionAccountSecrets() {
+    $('ca-credential').value = ''
+    $('ca-password').value = ''
+  }
+  function connectionAccountCanClose() {
+    if (connectionAccountSaving) {
+      text('conn-account-error', '正在保存站点账号，请等待结果；不要重复提交。')
+      return false
+    }
+    if (pending) {
+      text('conn-account-error', '上次创建结果未知。请点击“查询账号保存结果”，不要重复提交。')
+      return false
+    }
+    return !dirtyConnectionAccount || window.confirm('站点账号草稿尚未保存。确定放弃并关闭吗？')
+  }
+  function closeConnectionAccountDialog({ force = false } = {}) {
+    if (!force && !connectionAccountCanClose()) return false
+    clearConnectionAccountSecrets()
+    dirtyConnectionAccount = false
+    connectionAccountBaseline = null
+    connectionAccountBaseURL = ''
+    text('conn-account-error', '')
+    const dialog = $('conn-account-dialog')
+    if (dialog.open) dialog.close()
+    return true
+  }
+  function rememberConnectionBinding() {
+    const select = $('conn-binding')
+    const option = [...select.options].find(item => item.value === select.value)
+    return { value: select.value, label: option?.textContent ?? '' }
+  }
+  function restoreConnectionBinding(snapshot) {
+    if (!snapshot?.value || connection) return
+    const select = $('conn-binding')
+    if (![...select.options].some(item => item.value === snapshot.value)) {
+      const option = node('option', snapshot.label || snapshot.value)
+      option.value = snapshot.value
+      select.append(option)
+    }
+    select.value = snapshot.value
+  }
+  async function queryConnectionAccountResult() {
+    if (!pending || pending.action !== 'connection-accounts/save') return
+    $('ca-recover').disabled = true
+    try {
+      await recover()
+      if (!pending) {
+        $('ca-recover').hidden = true
+        for (const control of $('conn-account-form').querySelectorAll('button,input,select,textarea')) control.disabled = false
+        if ($('conn-account-dialog').open && !$('pro-error').hidden) text('conn-account-error', $('pro-error').textContent)
+      }
+    } finally {
+      $('ca-recover').disabled = false
+    }
+  }
+  function bindConnectionAccountDialogControls() {
+    $('conn-account-open').addEventListener('click', openConnectionAccountDialog)
+    $('conn-account-dialog').addEventListener('cancel', event => {
+      if (!connectionAccountCanClose()) event.preventDefault()
+    })
+    $('conn-account-dialog').addEventListener('close', () => {
+      clearConnectionAccountSecrets()
+      $('ca-recover').hidden = true
+      dirtyConnectionAccount = false
+      connectionAccountBaseline = null
+      connectionAccountBaseURL = ''
+    })
+    $('conn-account-form').addEventListener('input', () => { text('conn-account-error', ''); updateConnectionAccountDirty() })
+    $('conn-account-form').addEventListener('change', () => { text('conn-account-error', ''); updateConnectionAccountDirty() })
+    $('ca-site-type').addEventListener('change', () => {
+      $('ca-username').value = ''
+      $('ca-password').value = ''
+      toggleConnectionAccountType()
+      updateConnectionAccountDirty()
+    })
+    $('ca-auth-mode').addEventListener('change', () => {
+      $('ca-credential').value = ''
+      updateConnectionAccountAuth()
+      updateConnectionAccountDirty()
+    })
+    $('ca-cancel').addEventListener('click', () => closeConnectionAccountDialog())
+    $('ca-recover').addEventListener('click', () => { void queryConnectionAccountResult() })
+    $('conn-account-form').addEventListener('submit', event => { void submitConnectionAccount(event) })
+  }
+  async function submitConnectionAccount(event) {
+    event.preventDefault()
+    if (connectionAccountSaving || locked()) return
+    text('conn-account-error', '')
+    const values = connectionAccountFormValues()
+    const errors = connectionAccountErrors(values)
+    if (Object.keys(errors).length) { showConnectionAccountErrors(errors); return }
+    const { account, clearSecrets } = accountPayload(values)
+    const binding = rememberConnectionBinding()
+    const baseURL = connectionAccountBaseURL || $('conn-base').value.trim()
+    connectionAccountSaving = true
+    $('ca-save').disabled = true
+    try {
+      await run('connection-accounts/save', { baseURL, account, clearSecrets }, data => {
+        const savedAccountId = String(data?.account?.id ?? '')
+        if (!savedAccountId) { text('conn-account-error', '站点账号已保存，但未返回账号 ID；请重新读取后核对。'); return }
+        renderConnectionAccountOptions(savedAccountId)
+        $('conn-site-account').value = savedAccountId
+        restoreConnectionBinding(binding)
+        dirtyConnectionAccount = false
+        dirtyConnection = true
+        text('connection-form-state', '未保存')
+        text('connection-form-status', '账号已保存并选入连接草稿；点击保存连接才会绑定')
+        closeConnectionAccountDialog({ force: true })
+      })
+      if (pending?.action === 'connection-accounts/save') {
+        clearConnectionAccountSecrets()
+        connectionAccountBaseline = normalizedAccountDraft(connectionAccountFormValues())
+        dirtyConnectionAccount = false
+        $('ca-recover').hidden = false
+        text('conn-account-error', `结果未知。原操作标识：${pending.id}。请点击“查询账号保存结果”，不要重复提交。`)
+      }
+    } catch (error) {
+      text('conn-account-error', error?.message || '站点账号保存失败，草稿保留。')
+    } finally {
+      connectionAccountSaving = false
+      $('ca-save').disabled = Boolean(pending) || loading
+    }
   }
   function editConnection(item = null, { reveal = true } = {}) {
     if (!allowLeave()) return
@@ -1067,6 +1337,7 @@ async function mount() {
     catch{showError('未收到取消确认，请查询原操作，不要重复发送')}
     finally{if(!loading){$('test-cancel').disabled=false;text('test-cancel','取消测试')}}
   })
+  bindConnectionAccountDialogControls()
   window.addEventListener('beforeunload',event=>{if(isDirty()||locked()){event.preventDefault();event.returnValue=''}})
   // Back/forward and hand-edited hashes go through the same draft guard as the sidebar links.
   window.addEventListener('hashchange',()=>{if($('pro-shell').dataset.ready==='true'&&viewFromHash(location.hash)!==view)navigate(location.hash)})

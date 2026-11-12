@@ -3,7 +3,8 @@ import { createUATestRunner } from './ua-tests.mjs'
 import { validateTemplate } from './ua-transform.mjs'
 import { lookupUAModels, readModelCatalog, modelQueryScope } from './ua-runtime.mjs'
 import { createUAModelCatalog } from './ua-model-catalog.mjs'
-import { matchesAccountSite } from '../lib/ua-protocol.mjs'
+import { matchesAccountSite, siteRoot } from '../lib/ua-protocol.mjs'
+import { normalizeAccountConfig } from './newapi.mjs'
 import { createKeyUsage } from './key-usage.mjs'
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -70,6 +71,26 @@ export function createUAService({ store, legacyStore, accountManager, readAuth, 
           }
           throw failure('模型列表读取未完成，请重新打开管理页后重试', 400)
         }
+      }
+      if (action === 'connection-accounts/save') {
+        if (!accountManager) throw failure('站点账号管理尚未初始化', 409)
+        const raw = data.account
+        const allowed = ['name', 'siteType', 'siteUrl', 'userId', 'username', 'password', 'authMode', 'accessToken', 'cookie', 'quotaPerUnit', 'unit', 'enabled', 'checkinEnabled', 'schedule']
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => !allowed.includes(key))) throw failure('此入口只创建站点账号，请使用账号管理页编辑已有账号')
+        if (data.clearSecrets !== undefined && (!Array.isArray(data.clearSecrets) || data.clearSecrets.length)) throw failure('新账号不使用凭据清除标记')
+        const root = siteRoot(data.baseURL)
+        if (raw.siteUrl && siteRoot(raw.siteUrl) !== root) throw Object.assign(failure('站点账号必须使用当前连接的站点地址'), { fields: { siteUrl: '账号地址与当前连接不一致' } })
+        const config = normalizeAccountConfig({ ...raw, siteUrl: root })
+        const fields = {}
+        if (config.siteType === 'newapi') {
+          if (config.authMode === 'cookie' && !config.cookie) fields.cookie = '请填写此站点账号的登录 Cookie'
+          if (config.authMode === 'token' && !config.accessToken) fields.accessToken = '请填写此站点账号的系统访问令牌，不是模型 API key'
+        } else {
+          if (!config.username) fields.username = '请填写 AgentRouter 登录用户名'
+          if (!config.password) fields.password = '请填写 AgentRouter 登录密码'
+        }
+        if (Object.keys(fields).length) throw Object.assign(failure('请填写所选站点类型对应的账号凭据'), { fields })
+        return { account: await accountManager.save(config), message: '站点账号已保存；选择并保存连接后才会用于宿主余额与签到' }
       }
       if (action === 'connections/sync') {
         if (!syncConnections) throw failure('独立工具不能直接写入 Magpie；请从宿主打开 UA PRO 管理后同步', 409)

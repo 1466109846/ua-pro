@@ -760,6 +760,10 @@ dd {
   accent-color: var(--accent);
 }
 
+.conn-account-open-row {
+  margin: -4px 0 12px;
+}
+
 .check-list {
   display: grid;
   gap: 5px;

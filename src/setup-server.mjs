@@ -36,6 +36,7 @@ const ASSETS = {
   pro: ['pro.html', 'text/html; charset=utf-8'],
   'pro.js': ['pro.js', 'text/javascript; charset=utf-8'],
   'ui/pro.js': ['pro.js', 'text/javascript; charset=utf-8'],
+  'ui/accounts.js': ['accounts.js', 'text/javascript; charset=utf-8'],
   'lib/ua-protocol.mjs': ['../lib/ua-protocol.mjs', 'text/javascript; charset=utf-8'],
   'lib/ua-test-plan.mjs': ['../lib/ua-test-plan.mjs', 'text/javascript; charset=utf-8'],
   'pro.css': ['pro.css', 'text/css; charset=utf-8'],
