@@ -14,8 +14,8 @@ const sessions = new Map();
 const freshStatus = () => ({ stale: false, error: null, lastAttemptAt: null });
 const freshCheckin = () => ({ date: null, checkedAt: null, lastAttemptAt: null, rewardQuota: null, state: 'unknown', message: '' });
 const identity = a => JSON.stringify([a.siteUrl, a.siteType, a.userId || `username:${a.username}`]);
-// Credential-bearing fields reset when any login identity input changes, even if aliases still share a userId.
-const credentialIdentity = a => JSON.stringify([a.siteUrl, a.siteType, a.userId, a.username]);
+const balanceIdentity = a => JSON.stringify([a.siteUrl, a.userId || `username:${a.username}`]);
+const loginIdentity = a => JSON.stringify([a.siteUrl, a.siteType, a.userId, a.username]);
 const missing = () => new AccountValidationError('账号不存在。', 404);
 const own = (state, id) => { const account = state.accounts.find(a => a.id === id); if (!account) throw missing(); return account; };
 const successful = result => ['success', 'already', 'already_checked'].includes(result?.state);
@@ -157,13 +157,17 @@ export function createAccountManager({ path, fetchImpl, now = () => new Date(), 
           'schedule.enabled': '同一站点账号的别名只能设置一份自动签到，请先关闭另一份',
         });
       }
-      const unchangedIdentity = previous && credentialIdentity(previous) === credentialIdentity(config);
-      for (const secret of ['accessToken', 'cookie', 'password']) config[secret] = config[secret] || (!unchangedIdentity || clearSecrets.includes(secret) ? '' : previous?.[secret] ?? '');
+      const sameAccount = previous && balanceIdentity(previous) === balanceIdentity(config);
+      const sameLogin = previous && loginIdentity(previous) === loginIdentity(config);
+      for (const secret of ['accessToken', 'cookie', 'password']) {
+        const preserve = secret === 'password' ? sameLogin : sameAccount;
+        config[secret] = config[secret] || (!preserve || clearSecrets.includes(secret) ? '' : previous?.[secret] ?? '');
+      }
       const account = { ...config, id: previous?.id ?? uuid(), revision: randomUUID(),
-        snapshot: unchangedIdentity ? previous.snapshot : null,
-        history: unchangedIdentity ? previous.history : [],
-        status: unchangedIdentity ? previous.status : freshStatus(),
-        checkin: unchangedIdentity ? previous.checkin : freshCheckin() };
+        snapshot: sameAccount ? previous.snapshot : null,
+        history: sameAccount ? previous.history : [],
+        status: sameAccount ? previous.status : freshStatus(),
+        checkin: sameLogin ? previous.checkin : freshCheckin() };
       if (typeof account.id !== 'string' || !account.id || state.accounts.some(a => a.id === account.id && a !== previous)) throw new AccountValidationError('无法创建唯一账号 ID。', 409);
       if (previous) state.accounts[state.accounts.indexOf(previous)] = account;
       else state.accounts.push(account);

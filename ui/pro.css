@@ -328,7 +328,7 @@ code,
   display: block;
   margin-bottom: 3px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: 0.16em;
@@ -347,7 +347,7 @@ code,
   display: block;
   margin-top: 4px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -398,7 +398,7 @@ code,
 
 .nav-ext {
   align-self: center;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .pro-side-meta {
@@ -407,7 +407,7 @@ code,
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--panel);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.6;
 }
 
@@ -532,7 +532,7 @@ dd {
 .metric span {
   display: block;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .metric strong {
@@ -562,6 +562,7 @@ dd {
 
 .overview-item {
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 15px;
   padding: 16px 0;
@@ -585,9 +586,13 @@ dd {
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+.tag:empty {
+  display: none;
 }
 
 .tag.warn {
@@ -616,6 +621,10 @@ dd {
 .tpl-list {
   display: grid;
   gap: 14px;
+}
+
+.conn-list {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 }
 
 .conn-card,
@@ -803,6 +812,32 @@ details[open] > summary {
   display: none;
 }
 
+.form-status {
+  margin: 0 0 12px;
+  color: var(--success);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.form-status:empty {
+  display: none;
+}
+
+/* Server-side validation marks the control itself; the message stays in the
+   form's existing .form-error paragraph. */
+.field input[aria-invalid="true"],
+.field select[aria-invalid="true"],
+.field textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.field input[aria-invalid="true"]:focus,
+.field select[aria-invalid="true"]:focus,
+.field textarea[aria-invalid="true"]:focus {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
 /* Alerts */
 
 .pro-alert,
@@ -859,7 +894,7 @@ details[open] > summary {
   display: flex;
   flex-wrap: wrap;
   gap: 24px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.8;
 }
 
@@ -903,7 +938,7 @@ details[open] > summary {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--input);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.7;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -912,7 +947,7 @@ details[open] > summary {
 .diff-list {
   margin-bottom: 25px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
@@ -935,10 +970,20 @@ details[open] > summary {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--input);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .chips input {
+  flex: none;
+  width: 16px;
+  min-width: 0;
+  max-width: none;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
   accent-color: var(--accent);
 }
 
@@ -992,7 +1037,7 @@ details[open] > summary {
   padding: 10px 7px;
   background: var(--table-head);
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   text-align: left;
 }
 
@@ -1012,7 +1057,7 @@ details[open] > summary {
   border-radius: 5px;
   background: var(--input);
   color: var(--ink);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -1226,7 +1271,7 @@ details[open] > summary {
   min-width: 0;
   margin: 6px 0 16px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.6;
 }
 
@@ -1406,6 +1451,17 @@ details[open] > summary {
   color: var(--muted);
 }
 
+/* Wide desktop: keep the test result in view while the form scrolls. */
+
+@media (min-width: 1181px) {
+  .test-result-column {
+    position: sticky;
+    top: 24px;
+    max-height: calc(100vh - 48px);
+    overflow: auto;
+  }
+}
+
 /* Narrow desktop */
 
 @media (max-width: 1180px) {
@@ -1443,10 +1499,6 @@ details[open] > summary {
   .grid3 {
     grid-template-columns: 1fr;
   }
-
-  .conn-list {
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  }
 }
 
 /* Phone */
@@ -1460,33 +1512,37 @@ details[open] > summary {
     position: static;
     height: auto;
     overflow: visible;
-    padding: 16px;
+    padding: 10px 16px;
     border-right: 0;
     border-bottom: 1px solid var(--line);
-    gap: 16px;
+    gap: 8px;
   }
 
   .pro-brand-text small {
     max-width: none;
   }
 
+  .pro-eyebrow,
+  .pro-side-copy,
   .pro-side-meta {
     display: none;
   }
 
   .pro-nav {
-    flex-direction: row;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 4px;
     min-width: 0;
-    overflow: auto;
+    overflow: visible;
   }
 
   .pro-nav a {
-    flex: 0 0 auto;
+    justify-content: center;
     min-height: 44px;
-    padding: 10px 12px;
+    padding: 8px 6px;
     font-size: 12px;
-    white-space: nowrap;
+    text-align: center;
+    white-space: normal;
   }
 
   .pro-nav a[data-leave] {
@@ -1540,7 +1596,7 @@ details[open] > summary {
   }
 
   .metric span {
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .toolbar {
@@ -1572,9 +1628,14 @@ details[open] > summary {
   .field input,
   .field select,
   .field textarea {
+    font-size: 16px;
+  }
+
+  .field input:not([type=checkbox]):not([type=radio]),
+  .field select,
+  .field textarea {
     min-width: 0;
     min-height: 44px;
-    font-size: 16px;
   }
 
   .group {
@@ -1596,17 +1657,23 @@ details[open] > summary {
   }
 
   .tpl-actions {
-    gap: 7px;
-    padding: 12px 16px;
+    gap: 4px;
+    padding: 5px 12px;
   }
 
   .tpl-actions button {
     min-height: 44px;
+    padding: 6px 8px;
     font-size: 12px;
   }
 
   .tpl-dirty {
     flex-basis: 100%;
+    min-width: 0;
+    overflow: hidden;
+    line-height: 1.3;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .kv > div {
@@ -1631,7 +1698,7 @@ details[open] > summary {
   }
 
   .code-block {
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .pro-brand strong {
@@ -1668,6 +1735,58 @@ details[open] > summary {
 
   .model-fetch-result select {
     font-size: 16px;
+  }
+}
+
+/* Touch input: finger-sized targets on phones and coarse-pointer devices at any
+   width. Layout changes above stay width-driven. */
+
+@media (max-width: 700px), (pointer: coarse) {
+  button,
+  .btn {
+    min-height: 44px;
+  }
+
+  .card-actions button,
+  .hdr-table button,
+  .tpl-actions button {
+    min-height: 44px;
+  }
+
+  .test-model-picker > .link,
+  .link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .conn-card a,
+  .tpl-card a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .pro-nav a {
+    min-height: 44px;
+  }
+
+  summary {
+    min-height: 44px;
+    padding: 10px 0;
+  }
+
+  .check,
+  .check-list label {
+    min-height: 44px;
+  }
+
+  .field input:not([type=checkbox]):not([type=radio]),
+  .field select,
+  .field textarea,
+  .test-model-select,
+  .test-model-manual input {
+    min-height: 44px;
   }
 }
 

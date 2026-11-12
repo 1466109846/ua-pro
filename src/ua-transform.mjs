@@ -149,10 +149,11 @@ export function validateTemplate(raw) {
   });
   if (headerBytes > 65536) throw error('headers');
   const body = optional(raw.body, {});
-  known(body, ['codexMetadata', 'claudeCompatibility', 'identityprompt', 'fastBeta', 'parameters'], 'body');
+  known(body, ['codexMetadata', 'claudeCompatibility', 'identityprompt', 'fastBeta', 'parameters', 'promptCacheKey'], 'body');
   if (body.codexMetadata !== undefined && typeof body.codexMetadata !== 'boolean') throw error('body.codexMetadata');
   if (body.fastBeta !== undefined && typeof body.fastBeta !== 'boolean') throw error('body.fastBeta');
   out.body = { codexMetadata: optional(body.codexMetadata, false), claudeCompatibility: enumeration(optional(body.claudeCompatibility, 'off'), ['third-party-messages', 'off'], 'body.claudeCompatibility'), fastBeta: optional(body.fastBeta, false), parameters: parameters(body.parameters) };
+  if (body.promptCacheKey !== undefined) out.body.promptCacheKey = enumeration(body.promptCacheKey, ['off', 'session'], 'body.promptCacheKey');
   if (body.identityprompt !== undefined) {
     if (typeof body.identityprompt !== 'string' || !body.identityprompt.trim() || body.identityprompt.length > 8192 || body.identityprompt.includes('\0')) throw error('body.identityprompt');
     out.body.identityprompt = body.identityprompt;
@@ -275,6 +276,16 @@ function validUserID(value) {
   }
   return Boolean(fields.device_id && fields.session_id);
 }
+function messageSession(payload) {
+  const userID = payload?.metadata?.user_id;
+  if (typeof userID !== 'string') return undefined;
+  try {
+    const identity = JSON.parse(userID);
+    if (!isObject(identity)) return undefined;
+    const field = Object.keys(identity).find(name => name.toLowerCase() === 'session_id');
+    return field && typeof identity[field] === 'string' ? identity[field] : undefined;
+  } catch { return /_session_([a-fA-F0-9-]{36})$/.exec(userID)?.[1]; }
+}
 function systemBlocks(system, prompt) {
   if (system === undefined || system === null || system === '') return [{ type: 'text', text: prompt }];
   const matches = value => typeof value === 'string' && value.length <= Math.max(512, prompt.length * 2) && value.split(/\s+/).join(' ').trim() === prompt.split(/\s+/).join(' ').trim();
@@ -341,12 +352,14 @@ export async function transformRequest({ template, protocol, operation, input, i
     const sessionMode = t.identity.session;
     const messages = protocol === 'anthropic' && operation === 'messages';
     const complete = messages && !native && t.body.claudeCompatibility === 'third-party-messages';
+    const cacheKey = t.body.promptCacheKey === 'session' && ['messages', 'responses'].includes(operation);
     const plan = t.body.parameters;
     const active = !['count_tokens', 'countTokens'].includes(operation) && (Object.keys(plan.defaults).length || Object.keys(plan.overrides).length || plan.remove.length);
     const method = (init.method ?? (input instanceof Request ? input.method : 'POST')).toUpperCase();
     const hasBody = init.body != null || (input instanceof Request && input.body !== null);
     const canBody = !['GET', 'HEAD'].includes(method) && hasBody;
-    const required = canBody && (complete || active);
+    const required = canBody && (complete || active || cacheKey);
+    if (cacheKey && !canBody) throw error('body.prompt_cache_key', 'A request body is required for the configured prompt_cache_key rule');
     const encoded = headers.has('content-encoding') && headers.get('content-encoding').toLowerCase().trim() !== 'identity';
     if (required && encoded) throw error('body', 'Request body must be uncompressed for body transformation');
     let payload;
@@ -367,6 +380,7 @@ export async function transformRequest({ template, protocol, operation, input, i
     }
     const protectedBilling = payload && required ? billingSnapshot(payload) : undefined;
     const bodyModel = typeof payload?.model === 'string' && payload.model.trim() ? payload.model.trim() : undefined;
+    const cacheSession = cacheKey ? sessionHeader || messageSession(payload) || hostSession : undefined;
     const scope = typeof context.credentialScope === 'string' ? context.credentialScope : '';
     const base = typeof context.baseURL === 'string' ? context.baseURL : '';
     if (t.body.codexMetadata && protocol === 'responses' && payload) {
@@ -416,16 +430,21 @@ export async function transformRequest({ template, protocol, operation, input, i
         if (JSON.stringify(next) !== JSON.stringify(payload)) { payload = next; rewritten = true; change('body', 'explicit-parameters', 'merge'); }
       } catch { throw error('body.parameters', 'Request parameter transformation is invalid'); }
     }
-    if (messages && mode && !native && ['reference-stable', 'host'].includes(sessionMode) && !headers.get('x-claude-code-session-id')?.trim()) {
-      let bodySession;
-      const userID = payload?.metadata?.user_id;
-      if (typeof userID === 'string') {
-        try {
-          const identity = JSON.parse(userID);
-          const field = Object.keys(identity ?? {}).find(name => name.toLowerCase() === 'session_id');
-          if (field && typeof identity[field] === 'string') bodySession = identity[field];
-        } catch { bodySession = /_session_([a-fA-F0-9-]{36})$/.exec(userID)?.[1]; }
+    if (cacheKey && canBody && payload) {
+      const existing = payload.prompt_cache_key;
+      if (existing !== undefined && existing !== null && typeof existing !== 'string') throw error('body.prompt_cache_key', 'prompt_cache_key must be a string');
+      if (typeof existing !== 'string' || !existing.trim()) {
+        if (!cacheSession?.trim()) throw error('body.prompt_cache_key', 'A conversation session is required to generate prompt_cache_key');
+        if (!scope.trim()) throw error('body.prompt_cache_key', 'A credential scope is required to generate prompt_cache_key');
+        text(cacheSession, 'context.session', 512, false);
+        text(scope, 'context.credentialScope', 512, false);
+        payload = { ...payload, prompt_cache_key: hash('prompt-cache', base, scope, context.model ?? bodyModel ?? '', cacheSession) };
+        rewritten = true;
+        change('body.prompt_cache_key', 'session-prompt-cache-key', 'set-if-empty');
       }
+    }
+    if (messages && mode && !native && ['reference-stable', 'host'].includes(sessionMode) && !headers.get('x-claude-code-session-id')?.trim()) {
+      const bodySession = messageSession(payload);
       const session = bodySession || hostSession || sessionHeader || (sessionMode === 'reference-stable' ? uuid(base, scope, '', 'claude-session') : undefined);
       if (session) {
         text(session, 'context.session', 512, false);

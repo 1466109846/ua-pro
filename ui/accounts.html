@@ -11,18 +11,27 @@
 </head>
 <body>
   <div id="accounts-shell" class="accounts-shell">
-    <header class="accounts-header"><a class="brand" href="./pro"><img class="brand-icon" src="./icon.svg" width="44" height="44" alt=""><span>Magpie<br><strong>UA PRO</strong></span></a><nav aria-label="UA PRO 页面"><a href="./pro">UA PRO</a><a href="./accounts" aria-current="page">账号余额与签到</a></nav><div class="theme-control"><label for="theme-mode">外观</label><select id="theme-mode" data-theme-control><option value="system">跟随系统</option><option value="dark">夜间模式</option><option value="light">浅色模式</option></select></div><button id="accounts-done" class="secondary" type="button">完成并关闭</button></header>
+    <header class="accounts-header"><a class="brand" href="./pro"><img class="brand-icon" src="./icon.svg" width="44" height="44" alt=""><span>Magpie<br><strong>UA PRO</strong></span></a><nav aria-label="UA PRO 页面"><a href="./pro">UA PRO</a><a href="./accounts" aria-current="page">余额与签到</a></nav><div class="theme-control"><label for="theme-mode">外观</label><select id="theme-mode" data-theme-control><option value="system">跟随系统</option><option value="dark">夜间模式</option><option value="light">浅色模式</option></select></div><button id="accounts-done" class="secondary" type="button">完成并关闭</button></header>
     <main class="accounts-main">
       <div class="accounts-title"><div><h1>每个账号，独立记账</h1><p>管理 New API / AgentRouter 站点余额、累计消耗与签到奖励，不改变现有模型路由。</p></div><button id="account-new" class="primary" type="button">添加账号</button></div>
       <div id="accounts-error" class="accounts-error" role="alert" hidden tabindex="-1"></div>
-      <div id="account-totals" class="account-totals" aria-label="按单位汇总"></div>
+      <div id="account-totals" class="account-totals" aria-label="按单位汇总站点账号，不含连接 Key 余额"></div>
       <div class="account-toolbar">
-        <div class="account-toolbar-status"><p id="accounts-status" role="status">正在读取本地账号…</p><button id="accounts-retry" class="secondary" type="button" hidden>重新读取账号列表</button><button id="accounts-ack" class="secondary" type="button" hidden>已核对结果，继续操作</button></div>
+        <div class="account-toolbar-status"><p id="accounts-status" role="status">正在读取本地账号…</p><a id="accounts-connections-link" href="./pro#connections">在连接与模型选择对应签到账号</a><button id="accounts-retry" class="secondary" type="button" hidden>重新读取账号列表</button><button id="accounts-ack" class="secondary" type="button" hidden>已核对结果，继续操作</button></div>
         <div class="bulk-actions"><button id="refresh-all" class="secondary" type="button" disabled>刷新全部余额</button><button id="checkin-all" class="secondary" type="button" disabled>签到全部启用账号</button><span id="bulk-reason" class="bulk-reason" role="status" hidden></span></div>
       </div>
       <div id="account-empty" class="account-empty" hidden><h2>还没有站点账号</h2><p>添加站点地址、站点类型和系统访问令牌或 Cookie；AgentRouter 还可填写登录用户名与密码。模型 API key 不能代替站点账号凭据。</p></div>
       <div id="accounts-table-scroll" class="account-table-scroll"><table id="accounts-table"><thead><tr><th scope="col">账号 / 站点</th><th scope="col">剩余额度</th><th scope="col">累计消耗</th><th scope="col">相较上次成功刷新</th><th scope="col">签到</th><th scope="col">操作</th></tr></thead><tbody id="account-list"></tbody></table></div>
       <div class="account-notes"><p>增量从两次成功读取计算，不等于“今日用量”。首次读取无基线；计数回退时重新建立基线。查询失败保留旧读数并标记缓存。</p><p>不同单位分别汇总，不做汇率转换。自动签到需在账号中单独开启；请勿同时启用宿主的另一套自动签到计划。验证码请到站点完成。</p></div>
+      <section id="connection-balances" class="connection-balances" aria-labelledby="connection-balances-title">
+        <div class="account-toolbar">
+          <div class="account-toolbar-status"><div><h2 id="connection-balances-title">已配置连接余额/Key用量（不依赖签到凭据）</h2><p id="connection-balance-status" role="status">不会自动访问站点；请手动刷新连接 Key 用量。</p></div></div>
+          <div class="bulk-actions"><button id="connection-refresh-all" class="secondary" type="button" disabled>刷新全部连接 Key 用量</button></div>
+        </div>
+        <div id="connection-balance-list" class="account-table-scroll">
+          <table id="connection-balance-table"><thead><tr><th scope="col">连接 / 站点</th><th scope="col">Key 余额</th><th scope="col">Key 用量</th><th scope="col">最近查询</th></tr></thead><tbody id="connection-balance-rows"></tbody></table>
+        </div>
+      </section>
     </main>
   </div>
   <dialog id="account-editor" aria-labelledby="editor-title">

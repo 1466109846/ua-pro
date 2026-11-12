@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createConnectionDiagnostics } from './diagnostics.mjs';
 import { CLIENT_PRESETS, DEFAULT_METADATA_TEMPLATES, VARIABLE_DEFINITIONS, redactProfile } from './profile.mjs';
 
+const application = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const MAX_BODY_BYTES = 256 * 1024;
 // Fetch/browser bad-port list: a random listener must still be browser reachable.
 const BLOCKED_PORTS = new Set([1,7,9,11,13,15,17,19,20,21,22,23,25,37,42,43,53,69,77,79,87,95,101,102,103,104,109,110,111,113,115,117,119,123,135,137,139,143,161,179,389,427,465,512,513,514,515,526,530,531,532,540,548,554,556,563,587,601,636,989,990,993,995,1719,1720,1723,2049,3659,4045,4190,5060,5061,6000,6566,6665,6666,6667,6668,6669,6697,10080]);
@@ -235,7 +236,7 @@ export async function startSetupServer({
           if (request.method !== 'GET') return json(response, 405, { error: '不支持此请求方法' });
           const state = await uaService.state();
           if (settled) return ended(response);
-          return json(response, 200, { ...state, session: sessionInfo() });
+          return json(response, 200, { ...state, application: { name: 'UA PRO', version: application.version, provider: 'ua-pro' }, session: sessionInfo() });
         }
         if (request.method !== 'POST') return json(response, 405, { error: '不支持此请求方法' });
         if (request.headers.origin !== origin) return json(response, 403, { error: '操作必须从当前配置页面发起' });
@@ -302,11 +303,12 @@ export async function startSetupServer({
         if (settled) return ended(response);
         if (!accountManager) return json(response, 503, { error: '账号管理尚未初始化' });
         const accounts = await accountManager.list();
+        const connections = uaService?.accountConnections ? await uaService.accountConnections() : [];
         if (settled) return ended(response);
-        return json(response, 200, { ...accounts, ...(hostBinding ? { binding: { account: hostBinding.account, selected: hostBinding.selected } } : {}) });
+        return json(response, 200, { ...accounts, connections, ...(hostBinding ? { binding: { account: hostBinding.account, selected: hostBinding.selected } } : {}) });
       }
       const accountAction = route.startsWith('api/accounts/') ? route.slice('api/accounts/'.length) : null;
-      if (accountAction && !['save', 'remove', 'refresh', 'checkin', 'bind', 'done'].includes(accountAction)) return json(response, 404, { error: '账号接口不存在' });
+      if (accountAction && !['save', 'remove', 'refresh', 'checkin', 'bind', 'done', 'connection-usage'].includes(accountAction)) return json(response, 404, { error: '账号接口不存在' });
       if (!accountAction && !['api/save', 'api/check', 'api/cancel'].includes(route)) return json(response, 404, { error: '配置接口不存在' });
       if (request.method !== 'POST') return json(response, 405, { error: '不支持此请求方法' });
       if (request.headers.origin !== origin) return json(response, 403, { error: '保存必须从当前配置页面发起' });
@@ -332,6 +334,17 @@ export async function startSetupServer({
       if (settled) return ended(response, 409);
       if (saving) return busy(response);
       if (accountAction) {
+        if (accountAction === 'connection-usage') {
+          if (!uaService) return json(response, 503, { error: '连接余额查询尚未初始化' });
+          try {
+            const result = await uaService.execute('connections/usage', data);
+            if (settled) return ended(response);
+            return json(response, 200, result);
+          } catch (error) {
+            const status = [400, 404, 409].includes(error.status) ? error.status : 500;
+            return json(response, status, { error: status === 500 ? '连接余额读取未完成，请核对连接状态' : error.message });
+          }
+        }
         if (!accountManager) return json(response, 503, { error: '账号管理尚未初始化' });
         if (accountAction === 'done') {
           json(response, 200, { done: true });

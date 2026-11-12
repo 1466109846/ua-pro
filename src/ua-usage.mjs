@@ -16,14 +16,35 @@ export function createUAUsage({ providerId, input = {}, options = {}, accountMan
     if (selection.connection && !matchesAccountSite(selection.connection.baseURL, account)) throw new Error('站点绑定不匹配')
     return account
   }
+  const unavailable = message => ({ signIn: 'kept', error: message, windows: [{ name: '站点账号状态', aside: true, display: message }] })
+  async function keyFallback(selection, usage, message) {
+    if (selection.connection && queryKeyUsage) {
+      try {
+        const keyUsage = await queryKeyUsage(selection.connection, selection.auth)
+        if (keyUsage.balance !== undefined || keyUsage.windows?.some(window => Number.isFinite(window.amount))) {
+          return { ...keyUsage, error: `${message}；显示已配置连接的 Key 用量，签到凭据需单独核对`,
+            windows: [...(keyUsage.windows ?? []), { name: '站点账号状态', aside: true, display: message }] }
+        }
+      } catch { /* An optional Key reading must not discard the known account snapshot. */ }
+    }
+    return usage
+  }
   return {
     async usage(getAuth, provider = {}) {
       try {
         const selection = await selected(getAuth, provider)
         if (selection.accountId) {
-          const account = await boundAccount(selection)
-          if (!account.enabled) return { signIn: 'kept', windows: [{ name: account.name, display: '余额与签到账号已停用；聊天不受影响', aside: true }] }
-          return accountUsage(await accountManager.refresh(selection.accountId))
+          let account
+          try { account = await accountManager.get(selection.accountId) }
+          catch { return keyFallback(selection, unavailable('绑定的站点账号无法读取'), '绑定的站点账号无法读取') }
+          if (!matchesAccountSite(selection.connection.baseURL, account)) throw new Error('站点绑定不匹配')
+          if (!account.enabled) return keyFallback(selection, unavailable('余额与签到账号已停用；聊天不受影响'), '站点账号已停用')
+          let refreshed
+          try { refreshed = await accountManager.refresh(selection.accountId) }
+          catch { return keyFallback(selection, unavailable('站点账号余额未更新'), '站点账号余额未更新') }
+          const usage = accountUsage(refreshed)
+          return !refreshed.snapshot || refreshed.status?.stale
+            ? keyFallback(selection, usage, `站点账号余额未更新：${refreshed.status?.error || '尚无账号读数'}`) : usage
         }
         const connection = selection.connection ?? (selection.auth ? await getConnection(selection.auth, provider) : null)
         if (connection && queryKeyUsage) return queryKeyUsage(connection, selection.auth)

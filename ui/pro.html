@@ -13,7 +13,7 @@
 <body>
   <div id="pro-shell" class="pro-shell" data-ready="false">
     <aside class="pro-side">
-      <a class="pro-brand" href="#overview" aria-label="UA PRO 概览"><span class="pro-mark" aria-hidden="true"><img src="./icon.svg" width="40" height="40" alt=""></span><span class="pro-brand-text"><span class="pro-eyebrow">MAGPIE</span><strong>UA PRO</strong><small>Claude Code · Codex 出站兼容</small></span></a>
+      <a class="pro-brand" href="#overview" data-view-link="overview" aria-label="UA PRO 概览"><span class="pro-mark" aria-hidden="true"><img src="./icon.svg" width="40" height="40" alt=""></span><span class="pro-brand-text"><span class="pro-eyebrow">MAGPIE</span><strong>UA PRO</strong><small>Claude Code · Codex 出站兼容</small></span></a>
       <p class="pro-side-copy">配置连接，选择模板，<br>用真实模型验证请求。</p>
       <nav id="pro-nav" class="pro-nav" data-nav aria-label="UA PRO 分区">
         <a href="#overview" data-view-link="overview">概览</a>
@@ -25,6 +25,7 @@
       </nav>
       <dl class="pro-side-meta">
         <div class="pro-local-note"><dt>本地保存</dt><dd>密钥只存本机，不会显示在页面上。</dd></div>
+        <div><dt>运行版本</dt><dd id="pro-version">—</dd></div>
         <div><dt>配置 generation</dt><dd id="pro-generation" class="mono">—</dd></div>
         <div><dt>运行</dt><dd id="pro-runtime">读取中</dd></div>
       </dl>
@@ -33,7 +34,7 @@
     <main class="pro-main" id="pro-main">
       <header class="pro-head">
         <div class="pro-head-text"><h1 id="pro-title">概览</h1><p id="pro-status" role="status">正在读取 UA PRO 状态…</p></div>
-        <div class="pro-head-actions"><button id="pro-reload" type="button" class="ghost">重新读取</button><button id="pro-close" type="button" class="ghost">完成并关闭</button></div>
+        <div class="pro-head-actions"><button id="host-sync" type="button" class="ghost" hidden>同步到宿主</button><button id="pro-reload" type="button" class="ghost">重新读取</button><button id="pro-close" type="button" class="ghost">完成并关闭</button></div>
       </header>
       <div id="pro-error" class="pro-alert" role="alert" tabindex="-1" hidden></div>
       <div id="pro-pending" class="pro-pending" role="status" hidden>
@@ -49,10 +50,10 @@
           <button type="button" class="primary" data-action="connection-new">添加连接</button>
         </div>
         <div class="panel">
-          <div class="panel-head"><h2>连接与生效状态</h2><a href="#connections" class="link">管理连接</a></div>
+          <div class="panel-head"><h2>连接与生效状态</h2><a id="overview-manage-connections" href="#connections" data-view-link="connections" class="link">管理连接</a></div>
           <div id="overview-connections" class="overview-list"></div>
         </div>
-        <p class="note">保存成功只表示配置已写入文件；正在运行的宿主是否已采用，以实际请求观察到的 generation 为准。</p>
+        <p class="note">普通连接位于 Magpie 的 UA PRO 供应商账号列表；勾选独立显示后才会有单独供应商。注册状态与实际请求记录分别显示，页面测试不会自动代表宿主已载入。</p>
       </section>
 
       <section id="view-connections" data-view="connections" aria-labelledby="pro-title" hidden>
@@ -104,8 +105,9 @@
               <fieldset class="group">
                 <legend>站点与绑定</legend>
                 <label class="check"><input id="conn-enabled" type="checkbox" checked>启用此连接</label>
-                <label class="check"><input id="conn-independent" type="checkbox">在 Magpie 中独立显示此站点（需重载宿主）</label>
+                <label class="check"><input id="conn-independent" type="checkbox">作为独立供应商显示（不勾选时，位于 UA PRO 的账号列表）</label>
                 <label class="field" id="conn-site-field">站点 ID<input id="conn-site" maxlength="64" spellcheck="false" placeholder="main"></label>
+                <p class="hint">新增独立供应商保存后需重载 UA PRO 插件，再到 Magpie 供应商列表查看。</p>
                 <label class="field" id="conn-site-account-field">余额与签到账号<select id="conn-site-account"><option value="">不绑定签到账号（仅查询 Key 用量）</option></select></label>
                 <p id="conn-site-account-hint" class="hint">绑定只影响余额与签到，不复制凭据，也不改变模型请求；保存时按站点根地址校验。</p>
                 <p class="hint"><a id="conn-accounts-link" href="./accounts">管理签到账号</a>：补 Cookie、用户名或密码等凭据；旧绑定失效时会保留选项并提示重新选择。</p>
@@ -113,6 +115,7 @@
                 <p id="conn-binding-note" class="hint" hidden>已有连接的模板绑定只能通过“应用模板”更改，保存连接不会改变它。</p>
               </fieldset>
               <p id="connection-form-error" class="form-error" role="alert"></p>
+              <p id="connection-form-status" class="form-status" role="status" aria-live="polite"></p>
               <div class="form-actions"><button id="connection-remove" type="button" class="danger" hidden>删除连接</button><span class="spacer"></span><button id="connection-cancel" type="button" class="ghost">取消</button><button id="connection-save" type="submit" class="primary">保存连接</button></div>
             </form>
 
@@ -197,6 +200,11 @@
                 <details class="more" id="tpl-identity-details">
                   <summary>身份提示词（高级）</summary>
                   <label class="field">system 前缀文本<textarea id="tpl-identity-prompt" rows="3" spellcheck="false" placeholder="留空使用基线默认"></textarea></label>
+                </details>
+                <details class="more" id="tpl-prompt-cache-details">
+                  <summary>提示缓存键（高级，反代）</summary>
+                  <label class="field">Messages 提示缓存键<select id="tpl-prompt-cache-key"><option value="off">不添加（默认）</option><option value="session">会话缓存键（反代要求时开启）</option></select></label>
+                  <p class="hint">prompt_cache_key 是非标准 Messages 反代字段，只在上游明确要求时开启：为 Messages / Responses 推理请求按真实会话补缺。已有非空值不会被覆盖；count_tokens 不添加；其他模板不受影响。不要用于全部模型；通过“应用到连接”启用时只作用于单个模型。</p>
                 </details>
                 <div class="grid3">
                   <label class="field">parameters.defaults（JSON）<textarea id="tpl-defaults" class="code" rows="6" spellcheck="false"></textarea></label>
@@ -323,6 +331,7 @@
     <div class="dialog-head"><h2 id="history-title">版本历史</h2><button id="history-close" type="button" class="ghost">关闭</button></div>
     <div id="history-body" class="history-body"></div>
     <div id="history-diff" class="history-diff"></div>
+    <p id="history-error" class="form-error" role="alert"></p>
   </dialog>
 
   <dialog id="test-confirm" class="dialog" aria-labelledby="test-confirm-title">
@@ -331,14 +340,6 @@
       <p id="test-confirm-text"></p>
       <dl id="test-confirm-detail" class="kv"></dl>
       <div class="form-actions"><span class="spacer"></span><button id="test-confirm-cancel" type="submit" value="cancel" class="ghost">取消</button><button id="test-confirm-send" type="submit" value="confirm" class="primary">确认发送</button></div>
-    </form>
-  </dialog>
-
-  <dialog id="confirm-dialog" class="dialog" aria-labelledby="confirm-title">
-    <form method="dialog">
-      <h2 id="confirm-title">确认</h2>
-      <p id="confirm-text"></p>
-      <div class="form-actions"><span class="spacer"></span><button id="confirm-cancel" type="submit" value="cancel" class="ghost">继续编辑</button><button id="confirm-ok" type="submit" value="confirm" class="danger">确认</button></div>
     </form>
   </dialog>
 </body>

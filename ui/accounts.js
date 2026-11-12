@@ -4,6 +4,96 @@ export function formatAmount(value, signed = false) {
   return signed && value > 0 ? `+${text}` : text;
 }
 
+function formatConnectionTime(value) {
+  if (!value) return '尚未查询';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '尚未查询' : date.toLocaleString('zh-CN');
+}
+
+/** Classify a connection reading without ever borrowing site-account totals. */
+export function connectionBalanceSource(result) {
+  if (!result) return 'unknown';
+  const usage = result.usage && typeof result.usage === 'object' ? result.usage : null;
+  if (!usage) return result.error ? 'error' : 'unknown';
+  if (typeof usage.error === 'string' && usage.error.trim()) return 'error';
+  if (typeof usage.balance === 'string' && usage.balance.trim()) return 'key';
+  if (Array.isArray(usage.windows) && usage.windows.some(window => typeof window?.display === 'string' && window.display.trim())) return 'key';
+  return 'unknown';
+}
+
+/** Format one configured connection row; bindings are shown, never auto-selected. */
+export function connectionBalanceView(connection = {}, result = null, accounts = []) {
+  const usage = result?.usage && typeof result.usage === 'object' ? result.usage : null;
+  const windows = Array.isArray(usage?.windows) ? usage.windows : [];
+  const windowsText = windows
+    .map(item => typeof item?.display === 'string' ? item.display.trim() : '')
+    .filter(Boolean)
+    .join(' ');
+  const balance = typeof usage?.balance === 'string' && usage.balance.trim() ? usage.balance.trim() : '余额未知';
+  const source = connectionBalanceSource(result);
+  const accountId = connection.newApiAccountId ?? '';
+  const bound = accountId ? (Array.isArray(accounts) ? accounts : []).find(account => account.id === accountId) : null;
+  const boundAccount = !accountId
+    ? '未绑定签到账号'
+    : bound ? `签到账号：${bound.name}` : '绑定的签到账号已失效';
+  return {
+    name: String(connection.name ?? '').trim() || '未命名连接',
+    root: String(connection.baseURL ?? '').trim() || '—',
+    balance,
+    windows: windowsText,
+    source,
+    sourceLabel: source === 'key' ? '已配置连接 Key 用量' : source === 'error' ? '查询失败' : '尚未查询',
+    boundAccount,
+    lastAt: formatConnectionTime(result?.at),
+    error: typeof usage?.error === 'string' && usage.error.trim()
+      ? usage.error
+      : typeof result?.error === 'string' ? result.error : '',
+  };
+}
+
+/** A reading is valid only for the exact id, Key revision and address it came from. */
+export function connectionResultMatches(connection = {}, result = null) {
+  return Boolean(connection && result
+    && result.connectionId === connection.id
+    && result.revision === connection.revision
+    && result.baseURL === connection.baseURL);
+}
+
+/** Drop readings after a list reload changes the Key revision or address. */
+export function pruneConnectionResults(connections = [], results = {}) {
+  const kept = {};
+  for (const connection of Array.isArray(connections) ? connections : []) {
+    const result = results?.[connection.id];
+    if (connectionResultMatches(connection, result)) kept[connection.id] = result;
+  }
+  return kept;
+}
+
+/** Explicit same-origin refresh; the network is never touched by the initial list load. */
+export async function requestConnectionUsage(fetcher, connection = {}) {
+  let response;
+  try {
+    response = await fetcher('./api/accounts/connection-usage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ connectionId: connection.id, confirmNetwork: true }),
+    });
+  } catch {
+    return { ok: false, error: 'Key 用量查询未完成，请检查站点地址与网络' };
+  }
+  let data = null;
+  try { data = await response.json(); } catch { data = null; }
+  if (!response.ok) {
+    return { ok: false, error: data && typeof data.error === 'string' && data.error ? data.error : 'Key 用量查询未完成' };
+  }
+  if (!data || typeof data !== 'object' || data.connectionId !== connection.id
+    || !data.usage || typeof data.usage !== 'object') {
+    return { ok: false, error: 'Key 用量响应无法确认，请稍后重试' };
+  }
+  return { ok: true, data };
+}
+
+
 export function accountValues(account = {}) {
   return {
     id: account.id, name: account.name ?? '', siteType: account.siteType === 'agentrouter' ? 'agentrouter' : 'newapi',
@@ -111,9 +201,9 @@ export function accountDraftDirty(baseline, draft) {
   return JSON.stringify(baseline) !== JSON.stringify(draft);
 }
 
-export function bulkEligibility(accounts = []) {
+export function bulkEligibility(accounts = [], connections = []) {
   const list = Array.isArray(accounts) ? accounts : [];
-  const refresh = list.some((account) => account?.enabled === true);
+  const refresh = list.some((account) => account?.enabled === true) || (Array.isArray(connections) && connections.some(connection => connection?.enabled === true));
   const checkin = list.some((account) => account?.enabled === true && account?.checkinEnabled === true);
   return {
     refresh,
@@ -177,6 +267,8 @@ export async function initializeAccounts() {
     bind: '正在更新当前连接绑定…', remove: '正在删除账号…' };
   let accounts = [];
   let binding = null;
+  let connections = [];
+  let connectionResults = {};
   let editing;
   let running = false;
   let unknownOutcome = null;
@@ -244,10 +336,11 @@ export async function initializeAccounts() {
     return window.confirm('有未保存的账号修改。确定放弃修改并继续吗？选择“取消”可返回继续编辑。');
   }
   function syncControls() {
-    const bulk = bulkEligibility(accounts);
+    const bulk = bulkEligibility(accounts, connections);
     const blocked = running || Boolean(unknownOutcome);
     get('refresh-all').disabled = blocked || loading || !bulk.refresh;
     get('checkin-all').disabled = blocked || loading || !bulk.checkin;
+    get('connection-refresh-all').disabled = blocked || loading || connections.length === 0;
     get('account-new').disabled = blocked;
     get('accounts-done').disabled = blocked;
     get('account-save').disabled = blocked;
@@ -370,15 +463,81 @@ export async function initializeAccounts() {
       return;
     }
     if (!result.ok) error(result.error);
-    busy(false);
     await load();
+    try {
+      if (action === 'refresh' && !id) await refreshConnections();
+    } finally {
+      busy(false);
+    }
   }
   function statusSummary() {
     if (accounts.length === 0) return '尚未添加站点账号。添加后可刷新余额或签到。';
-    return `${accounts.length} 个账号，${accounts.filter((account) => account.enabled).length} 个启用。${binding ? `当前连接 ${binding.account}；绑定需点击完成后保存。` : '从 Magpie 当前账号的管理入口可绑定余额与签到。'}`;
+    return `${accounts.length} 个账号，${accounts.filter((account) => account.enabled).length} 个启用。${binding ? `当前连接 ${binding.account}；绑定需点击完成后保存。` : '签到账号绑定请在连接与模型选择中操作。'}`;
+  }
+  function renderConnections() {
+    connectionResults = pruneConnectionResults(connections, connectionResults);
+    const list = get('connection-balance-list');
+    const empty = connections.length === 0;
+    list.hidden = empty;
+    get('connection-balance-rows').replaceChildren(...connections.map((connection) => {
+      const result = connectionResults[connection.id] ?? null;
+      const view = connectionBalanceView(connection, result, accounts);
+      const row = element('tr');
+      const identity = element('td');
+      identity.append(element('strong', view.name), element('div', view.root, 'detail'), element('div', view.boundAccount, 'detail'));
+      const balance = element('td');
+      balance.append(element('div', view.balance, 'primary-value'), element('div', view.sourceLabel, 'detail'));
+      const usage = element('td');
+      usage.append(element('div', view.windows || '—', 'detail'));
+      if (view.error && !view.windows.includes(view.error)) usage.append(element('div', view.error, 'detail'));
+      const last = element('td');
+      last.append(element('div', view.lastAt, 'detail'));
+      for (const [cell, label] of [[identity, '连接 / 站点'], [balance, 'Key 余额'], [usage, 'Key 用量'], [last, '最近查询']]) cell.dataset.label = label;
+      row.append(identity, balance, usage, last);
+      return row;
+    }));
+    if (empty) {
+      get('connection-balance-status').textContent = '尚未读取到已配置连接；请先在连接与模型选择中保存连接。';
+    } else if (Object.keys(connectionResults).length === 0) {
+      get('connection-balance-status').textContent = `已读取 ${connections.length} 个连接，Key 余额尚未查询；请手动刷新。`;
+    }
+  }
+  async function refreshConnections() {
+    const targets = connections.slice();
+    if (targets.length === 0) {
+      get('connection-balance-status').textContent = '尚未读取到已配置连接；没有可刷新的 Key 用量。';
+      return;
+    }
+    get('connection-balance-status').textContent = `正在刷新 ${targets.length} 个连接的 Key 用量…`;
+    let completed = 0;
+    let failed = 0;
+    let discarded = 0;
+    for (const target of targets) {
+      const current = connections.find((connection) => connection.id === target.id);
+      if (!current || current.revision !== target.revision || current.baseURL !== target.baseURL) continue;
+      const result = await requestConnectionUsage(fetch.bind(globalThis), current);
+      const latest = connections.find((connection) => connection.id === current.id);
+      if (!latest || latest.revision !== current.revision || latest.baseURL !== current.baseURL) { discarded++; continue; }
+      if (result.ok && result.data.revision !== current.revision) { discarded++; continue; }
+      connectionResults[current.id] = result.ok
+        ? { connectionId: current.id, revision: current.revision, baseURL: current.baseURL, usage: result.data.usage, at: result.data.at || new Date().toISOString() }
+        : { connectionId: current.id, revision: current.revision, baseURL: current.baseURL, error: result.error, at: new Date().toISOString() };
+      if (result.ok) completed++;
+      else failed++;
+      renderConnections();
+      get('connection-balance-status').textContent = `正在刷新连接 Key 用量…（${completed + failed}/${targets.length}）`;
+    }
+    renderConnections();
+    get('connection-balance-status').textContent = discarded
+      ? `已刷新 ${completed + failed} 个连接；${discarded} 个结果因 Key 或站点已变化而丢弃，请重新读取列表。`
+      : failed
+        ? `已刷新 ${completed + failed} 个连接；${failed} 个查询失败，详见各行站点返回的安全提示。`
+        : `已刷新 ${completed} 个连接的 Key 用量；不与站点账号汇总合并。`;
   }
   function render(data) {
     accounts = Array.isArray(data.accounts) ? data.accounts : [];
+    connections = Array.isArray(data.connections) ? data.connections : [];
+    connectionResults = pruneConnectionResults(connections, connectionResults);
     binding = data.binding ?? null;
     const empty = accounts.length === 0;
     get('account-empty').hidden = !empty;
@@ -386,7 +545,7 @@ export async function initializeAccounts() {
     get('accounts-table').hidden = empty;
     get('accounts-status').textContent = statusSummary();
     get('account-totals').replaceChildren(...Object.entries(data.totals ?? {}).map(([unit, total]) => {
-      const node = element('section', undefined, 'unit-total'); node.append(element('h2', `${unit} 账号汇总`));
+      const node = element('section', undefined, 'unit-total'); node.append(element('h2', `${unit} 站点账号汇总`));
       const metrics = element('div', undefined, 'total-values');
       for (const [name, value] of [['剩余额度', total.remaining], ['累计消耗', total.used], ['消耗增量', total.deltaUsed]]) {
         const metric = element('div', undefined, 'total-metric'); metric.append(element('small', name), element('strong', formatAmount(value))); metrics.append(metric);
@@ -421,6 +580,7 @@ export async function initializeAccounts() {
       for (const [cell, label] of [[identity, '账号 / 站点'], [remaining, '剩余额度'], [used, '累计消耗'], [delta, '相较上次成功刷新'], [checkin, '签到'], [actions, '操作']]) cell.dataset.label = label;
       return row;
     }));
+    renderConnections();
     syncControls();
   }
   async function load() {
@@ -465,10 +625,14 @@ export async function initializeAccounts() {
       get('accounts-retry').hidden = false;
       if (!hasLoaded) {
         accounts = [];
+        connections = [];
+        connectionResults = {};
         get('account-empty').hidden = true;
         get('accounts-table-scroll').hidden = true;
         get('accounts-table').hidden = true;
         get('account-totals').replaceChildren();
+        renderConnections();
+        get('connection-balance-status').textContent = '连接列表尚未读取；请先重新读取账号列表。';
       }
     } finally {
       loading = false;
@@ -497,6 +661,17 @@ export async function initializeAccounts() {
   get('editor-ack').addEventListener('click', acknowledgeUnknown);
   get('refresh-all').addEventListener('click', () => perform('refresh'));
   get('checkin-all').addEventListener('click', () => perform('checkin'));
+  get('connection-refresh-all').addEventListener('click', async () => {
+    if (running || unknownOutcome) return;
+    busy(true); error('');
+    try {
+      await refreshConnections();
+    } catch {
+      error('连接 Key 用量刷新未完成，请稍后重试。');
+    } finally {
+      busy(false);
+    }
+  });
   get('account-form').addEventListener('input', (event) => {
     const target = event.target;
     if (target && typeof target.matches === 'function' && target.matches('[aria-invalid]')) {

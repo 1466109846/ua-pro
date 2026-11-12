@@ -23,6 +23,12 @@ export function forkTemplate(base, name) {
   draft.name = name.trim()
   return draft
 }
+export function promptCacheKeyMode(value) {
+  return value === 'session' ? 'session' : 'off'
+}
+export function templatePromptCacheKey(body) {
+  return promptCacheKeyMode(body?.promptCacheKey)
+}
 export function jsonObject(text, label) {
   let value
   try { value = JSON.parse(text || '{}') } catch { throw new Error(`${label} 必须是有效 JSON`) }
@@ -135,6 +141,22 @@ export function testModelOptions(connection, catalog) {
 export function selectTestModel(models, current = '') {
   return models.some(model => model.id === current) ? current : models[0]?.id ?? ''
 }
+export function connectionHostView(state = {}, connection = {}) {
+  const provider = connection.independent && connection.siteId ? `ua-pro-${connection.siteId}` : 'ua-pro'
+  const host = state.runtime?.connections?.find(item => item.connectionId === connection.id)
+  if (connection.enabled === false) return { label: '连接已停用', detail: `${provider} · 此连接不参与模型请求` }
+  if (state.runtime?.mode !== 'host') return { label: '仅本地保存，未同步到宿主', detail: `在 Magpie 打开 UA PRO 管理并同步后，连接位于 ${provider} 的账号列表` }
+  if (host?.status === 'registered') return { label: '已注册到宿主', detail: `Magpie 供应商 ${host.provider || provider} · 账号 ${connection.name || host.account}；请刷新宿主模型列表` }
+  if (host?.status === 'reload-required') return { label: '需重载插件', detail: `新增供应商 ${host.provider || provider} 尚未载入，请在 Magpie 重载 UA PRO` }
+  return { label: host?.status === 'conflict' ? '账号冲突，未覆盖' : '尚未同步到宿主', detail: host?.message || `点击“同步到宿主”注册到 ${provider} 的账号列表` }
+}
+export function connectionSaveMessage(result = {}) {
+  if (result.message) return result.message
+  if (result.registration === 'registered') return `连接已保存并注册到宿主 ${result.host?.provider || 'UA PRO'}；在供应商的账号列表中查看并刷新模型`
+  if (result.registration === 'pending-reload') return '连接已保存，宿主尚未确认；请同步到宿主或重载 UA PRO 插件'
+  return '连接已保存到本地；测试成功不代表已同步，请在 Magpie 打开 UA PRO 管理并同步到宿主'
+}
+
 export function gatewayModelReference(connection, model) {
   const provider = connection?.independent && connection.siteId ? `ua-pro-${connection.siteId}` : 'ua-pro'
   return model ? `${provider}/${model}` : ''
@@ -148,6 +170,36 @@ export function sampleBody(protocol, model, stream) {
 }
 export function operationErrorText(result) {
   return [...new Set([result.error, ...Object.values(result.fields ?? {})].filter(value => typeof value === 'string' && value.trim()))].join('\n') || '操作未完成'
+}
+export const VIEWS = ['overview', 'connections', 'templates', 'tests', 'settings']
+export function viewFromHash(hash) {
+  const view = String(hash ?? '').replace(/^#/, '')
+  return VIEWS.includes(view) ? view : 'overview'
+}
+const PROTOCOL_LABELS = { auto: '自动（按请求协议）', anthropic: 'Messages', responses: 'Responses', 'chat-completions': 'Chat Completions', gemini: 'Gemini' }
+export function protocolLabel(protocol) {
+  if (!protocol) return '未选择'
+  return Object.hasOwn(PROTOCOL_LABELS, protocol) ? PROTOCOL_LABELS[protocol] : String(protocol)
+}
+export function connectionCardSummary(connection = {}) {
+  return { address: connection.baseURL ?? '', detail: `默认协议 ${protocolLabel(connection.protocol)} · ${connection.auth?.source === 'host' ? '宿主凭据' : '本地连接凭据'}` }
+}
+const SESSION_MODES = { editor: '编辑会话', authorization: '授权会话' }
+const SESSION_STATES = { active: '进行中', saved: '已保存', cancelled: '已关闭', expired: '已超时' }
+export function sessionRows(session) {
+  if (!session || typeof session !== 'object') return []
+  const pick = (labels, value) => Object.hasOwn(labels, value) ? labels[value] : String(value ?? '未知')
+  return [['会话类型', pick(SESSION_MODES, session.mode)], ['状态', pick(SESSION_STATES, session.state)], ['本次保存', session.savedAt ? catalogTime(session.savedAt) : '尚未保存']]
+}
+const FIELD_TARGETS = {
+  'connections/save': { name: 'conn-name', baseURL: 'conn-base', auth: 'conn-auth-mode', protocol: 'conn-protocol', models: 'conn-models', modelProtocols: 'conn-model-protocols', apiPaths: 'conn-protocol', siteId: 'conn-site', independent: 'conn-independent', enabled: 'conn-enabled', newApiAccountId: 'conn-site-account', binding: 'conn-binding' },
+  'templates/save': { name: 'tpl-name' },
+}
+/** The form control a server-side field error belongs to, or '' when the form has none. */
+export function operationFieldTarget(action, fields) {
+  const targets = FIELD_TARGETS[action]
+  if (!targets || !fields || typeof fields !== 'object') return ''
+  return Object.keys(fields).map(key => Object.hasOwn(targets, key) ? targets[key] : '').find(Boolean) ?? ''
 }
 export function testRequestIdentity(payload) {
   const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value
@@ -181,6 +233,32 @@ async function mount() {
   const tag = value => node('span', value, 'tag')
   const status = value => text('pro-status', value)
   const showError = error => { $('pro-error').hidden = !error; $('pro-error').textContent = error ? String(error.message ?? error) : '' }
+  // Operations started from a form report back inside that form, next to the button the user pressed.
+  const FORM_ERRORS = { 'connections/save': 'connection-form-error', 'connections/remove': 'connection-form-error', 'bindings/apply': 'binding-error', 'templates/save': 'tpl-error', 'templates/remove': 'history-error' }
+  function revealPanel(panel, focusTarget) {
+    if (!panel || panel.hidden) return
+    const box = panel.getBoundingClientRect()
+    if (box.top < 0 || box.top > innerHeight * 0.6) panel.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+    focusTarget?.focus({ preventScroll: true })
+  }
+  function clearFieldErrors(form) {
+    for (const control of form?.querySelectorAll('[aria-invalid="true"]') ?? []) control.removeAttribute('aria-invalid')
+  }
+  function showFormError(action, result) {
+    const target = $(FORM_ERRORS[action])
+    if (!target || (target.closest('[hidden]') && !target.closest('dialog[open]'))) return false
+    const form = target.closest('form') ?? target.closest('dialog')
+    clearFieldErrors(form)
+    text(target.id, operationErrorText(result))
+    const field = $(operationFieldTarget(action, result.fields))
+    if (field && !field.closest('[hidden]')) { field.setAttribute('aria-invalid', 'true'); field.focus(); field.scrollIntoView({ block: 'center' }) }
+    else target.scrollIntoView({ block: 'nearest' })
+    return true
+  }
+  function clearFormFeedback(form) {
+    clearFieldErrors(form)
+    for (const target of form?.querySelectorAll('.form-error') ?? []) target.textContent = ''
+  }
   function isDirty() { return dirtyTemplate || dirtyConnection || dirtyTestSample }
   function locked() { return loading || Boolean(pending) || Boolean(modelQuery) }
   function allowLeave() {
@@ -228,10 +306,10 @@ async function mount() {
       return
     }
     operation = null
-    if (!result.ok) { showError(operationErrorText(result)); status('操作未完成，草稿保留'); return }
+    if (!result.ok) { if (!showFormError(action, result)) showError(operationErrorText(result)); status('操作未完成，草稿保留'); return }
     await refresh()
     if (complete) await complete(result.data)
-    status(action === 'test' ? result.data.result?.status === 'passed' ? '测试完成：通过' : '测试完成：未通过，请查看本次原因' : action === 'routes/apply' ? '模型路由已保存，请在 Magpie 重新获取模型或重载插件' : result.data.activation ? '已保存绑定；等待宿主后续请求确认使用版本' : '操作完成')
+    status(action === 'test' ? result.data.result?.status === 'passed' ? '测试完成：通过' : '测试完成：未通过，请查看本次原因' : action === 'connections/save' ? connectionSaveMessage(result.data) : action === 'connections/sync' ? result.data.message || '宿主同步完成，请刷新 Magpie 供应商和模型列表' : action === 'routes/apply' ? '模型路由已保存，请在 Magpie 重新获取模型或重载插件' : result.data.activation ? '已保存绑定；等待宿主后续请求确认使用版本' : '操作完成')
   }
   async function recover() {
     if (!pending || loading) return
@@ -246,8 +324,8 @@ async function mount() {
     } catch { showError('暂时无法查询结果，请稍后重试') }
   }
   function navigate(next, force = false) {
-    if (!['overview', 'connections', 'templates', 'tests', 'settings'].includes(next)) next = 'overview'
-    if (!force && next !== view && !allowLeave()) return
+    next = viewFromHash(next)
+    if (!force && next !== view && !allowLeave()) { if (location.hash !== `#${view}`) history.replaceState(null, '', `#${view}`); return }
     if (next !== view && !force) { dirtyConnection = false; dirtyTemplate = false; dirtyTestSample = false }
     if (next === 'templates' && !force) { $('template-library').hidden = false; $('template-editor').hidden = true }
     if (next !== 'tests') cancelTestModelQuery()
@@ -255,7 +333,7 @@ async function mount() {
     for (const section of document.querySelectorAll('[data-view]')) section.hidden = section.dataset.view !== next
     for (const link of document.querySelectorAll('[data-view-link]')) { if (link.dataset.viewLink === next) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current') }
     text('pro-title', { overview: '概览', connections: '连接与模型', templates: '模板库', tests: '测试', settings: '设置' }[next])
-    history.replaceState(null, '', `#${next}`)
+    if (location.hash !== `#${next}`) history.pushState(null, '', `#${next}`)
     if (next === 'tests') syncTestConnection({ autoFetch: true })
   }
   function bindingLabel(binding) {
@@ -264,6 +342,7 @@ async function mount() {
   }
   function renderState() {
     text('pro-generation', state.generation)
+    text('pro-version', state.application?.version || '版本未知，请重新打开插件管理')
     text('pro-runtime', state.runtime?.mode === 'host' ? 'Magpie 插件宿主' : '独立配置工具')
     $('overview-metrics').replaceChildren(...[
       [state.connections.filter(item => item.enabled).length, '启用连接'],
@@ -271,11 +350,19 @@ async function mount() {
       [state.runtime?.observed?.length ?? 0, '宿主已观察连接'],
     ].map(([count, label]) => { const item = node('div', undefined, 'metric'); item.append(node('span', label), node('strong', count)); return item }))
     $('overview-empty').hidden = state.connections.length > 0
-    $('overview-connections').replaceChildren(...state.connections.map(item => { const row = node('div', undefined, 'overview-item'); const info = node('div'); info.append(node('strong', item.name), node('small', item.baseURL), node('small', bindingLabel(item.binding))); const seen = state.runtime?.observed?.find(entry => entry.connectionId === item.id); row.append(info, tag(seen ? `观察 generation ${seen.generation} · ${seen.templateId ?? '普通转发'} @ ${seen.revision ?? '—'}` : '等待宿主观察')); return row }))
-    $('connection-list').replaceChildren(...state.connections.map(item => { const card = node('article', undefined, 'conn-card'); card.append(node('h3', item.name), tag(item.enabled ? '启用' : '停用'), node('p', `${item.baseURL}\n${item.protocol} · ${item.auth.source === 'host' ? '宿主凭据' : '本地连接凭据'}`), node('p', bindingLabel(item.binding)), node('p', connectionAccountBindingLabel(item.newApiAccountId, state.siteAccounts), 'hint'), (() => { const link = node('a', '管理签到账号 / 补 Cookie 或登录凭据'); link.href = './accounts'; link.addEventListener('click', event => { if (!allowLeave()) event.preventDefault() }); return link })()); const actions = node('div', undefined, 'card-actions'); actions.append(button('编辑', () => editConnection(item)), button('应用模板', () => openBinding([item.id])), button('测试', () => openTest(item.id))); card.append(actions); return card }))
+    $('host-sync').hidden = state.runtime?.mode !== 'host'
+    $('overview-connections').replaceChildren(...state.connections.map(item => {
+      const row = node('div', undefined, 'overview-item'), info = node('div'), host = connectionHostView(state, item)
+      info.append(node('strong', item.name), node('small', item.baseURL), node('small', bindingLabel(item.binding)), node('small', host.detail))
+      const seen = state.runtime?.observed?.find(entry => entry.connectionId === item.id)
+      row.append(info, tag(seen ? `已用于请求 · generation ${seen.generation}` : host.label))
+      return row
+    }))
+    if (!state.connections.length) $('overview-connections').replaceChildren(node('p', '暂无连接，添加后在这里显示注册与请求状态。', 'empty-note'))
+    $('connection-list').replaceChildren(...(state.connections.length ? [] : [(() => { const empty = node('div', undefined, 'empty'); empty.append(node('h2', '还没有连接'), node('p', '点击右上角“添加连接”，填写站点地址和 key。保存后可在此编辑、应用模板或测试。')); return empty })()]), ...state.connections.map(item => { const card = node('article', undefined, 'conn-card'), summary = connectionCardSummary(item); card.append(node('h3', item.name), tag(item.enabled ? '启用' : '停用'), node('p', summary.address, 'mono'), node('p', summary.detail), node('p', bindingLabel(item.binding)), node('p', connectionAccountBindingLabel(item.newApiAccountId, state.siteAccounts), 'hint'), (() => { const link = node('a', '管理签到账号 / 补 Cookie 或登录凭据'); link.href = './accounts'; link.addEventListener('click', event => { if (!allowLeave()) event.preventDefault() }); return link })()); const actions = node('div', undefined, 'card-actions'); actions.append(button('编辑', () => editConnection(item)), button('应用模板', () => openBinding([item.id])), button('测试', () => openTest(item.id))); card.append(actions); return card }))
     renderTemplates()
     renderConnectionSelectors()
-    $('session-info').replaceChildren(...Object.entries(state.session ?? {}).map(([key, value]) => { const item = node('div'); item.append(node('dt', key), node('dd', value)); return item }))
+    $('session-info').replaceChildren(...sessionRows(state.session).map(([key, value]) => { const item = node('div'); item.append(node('dt', key), node('dd', value)); return item }))
   }
   function renderTemplates() {
     const archived = $('template-show-archived').checked
@@ -418,7 +505,7 @@ async function mount() {
         : '未找到同站点账号，暂显示全部；保存时后端仍会校验站点根地址一致。')
     return result
   }
-  function editConnection(item = null) {
+  function editConnection(item = null, { reveal = true } = {}) {
     if (!allowLeave()) return
     resetModelQuery()
     navigate('connections', true)
@@ -430,10 +517,11 @@ async function mount() {
     renderConnectionAccountOptions(item?.newApiAccountId ?? '')
     for (const control of document.querySelectorAll('[data-api-path]')) control.value = item?.apiPaths?.[control.dataset.apiPath] ?? ''
     $('connection-remove').hidden = !item; $('conn-binding-field').hidden = Boolean(item); $('conn-binding-note').hidden = !item
-    $('conn-binding').value = 'auto'; text('connection-form-error', ''); updateAuthFields()
-    connectionBaseline = JSON.stringify(connectionDraft()); dirtyConnection = false
+    $('conn-binding').value = 'auto'; clearFormFeedback($('connection-form')); text('connection-form-status', ''); updateAuthFields()
+    connectionBaseline = JSON.stringify(connectionDraft()); dirtyConnection = false; text('connection-form-state', '')
     const cachedCatalog = catalogFor(state, item?.id)
     if (cachedCatalog) showModelResult(cachedCatalog)
+    if (reveal) revealPanel($('connection-form'), $('conn-name'))
   }
   function openBinding(ids = [], ref = null) {
     if (!allowLeave()) return
@@ -443,7 +531,9 @@ async function mount() {
     $('binding-connections').replaceChildren(...state.connections.map(item => { const label = node('label'); const input = document.createElement('input'); input.type = 'checkbox'; input.value = item.id; input.checked = ids.includes(item.id); label.append(input, node('span', item.name)); return label }))
     $('binding-mode').value = ref ? 'template' : 'auto'; $('binding-scope').value = 'connection'; $('binding-model').value = ''
     if (ref) { $('binding-template').value = ref.id; renderRevisions('binding', ref.revision) }
+    clearFormFeedback($('binding-form'))
     bindingFields()
+    revealPanel($('binding-form'), $('binding-connections').querySelector('input') ?? $('binding-mode'))
   }
   function bindingFields() {
     $('binding-template-fields').hidden = $('binding-mode').value !== 'template'
@@ -479,7 +569,7 @@ async function mount() {
     draft.operations = [...$('tpl-operations').querySelectorAll('input:checked')].map(input => input.value)
     draft.identity = { ...draft.identity, detector: $('tpl-detector').value, mode: $('tpl-mode').value, session: $('tpl-session').value, userAgent: $('tpl-ua').value, version: $('tpl-version').value }
     draft.headers = [...$('tpl-headers').tBodies[0].rows].map(row => { const get = field => row.querySelector(`[data-field="${field}"]`); const action = get('action').value; const entry = { name: get('name').value, action, enabled: get('enabled').checked, when: get('when').value }; if (!['delete','preserve'].includes(action)) entry.value = get('value').value; if (get('operations').value.trim()) entry.operations = get('operations').value.split(',').map(value => value.trim()).filter(Boolean); return entry })
-    draft.body = { ...draft.body, codexMetadata: $('tpl-codex-metadata').checked, claudeCompatibility: $('tpl-claude-compat').value, fastBeta: $('tpl-fast-beta').checked,
+    draft.body = { ...draft.body, codexMetadata: $('tpl-codex-metadata').checked, claudeCompatibility: $('tpl-claude-compat').value, fastBeta: $('tpl-fast-beta').checked, promptCacheKey: promptCacheKeyMode($('tpl-prompt-cache-key').value),
       parameters: { defaults: jsonObject($('tpl-defaults').value,'defaults'), overrides: jsonObject($('tpl-overrides').value,'overrides'), remove: lines($('tpl-remove').value) } }
     if ($('tpl-identity-prompt').value.trim()) draft.body.identityprompt = $('tpl-identity-prompt').value; else delete draft.body.identityprompt
     draft.limits = { maxBodyBytes: Number($('tpl-max-body').value), bodyTimeoutMs: Number($('tpl-body-timeout').value), maxMetadataBytes: Number($('tpl-max-metadata').value) }
@@ -500,7 +590,7 @@ async function mount() {
       text('tpl-error','')
     } catch (cause) { dirtyTemplate = true; text('tpl-error',cause.message); $('tpl-apply').disabled = true }
   }
-  function editTemplate(item, isNew = false) {
+  function editTemplate(item, isNew = false, { reveal = true } = {}) {
     if (!isNew && !allowLeave()) return
     navigate('templates', true)
     template = clone(item)
@@ -509,20 +599,23 @@ async function mount() {
     $('tpl-name').value = item.name
     checkboxes($('tpl-protocols'), PROTOCOLS, item.protocols)
     checkboxes($('tpl-operations'), [...new Set(Object.values(OPERATIONS).flat())], item.operations)
-    for (const [id, value] of Object.entries({ 'tpl-detector': item.identity.detector, 'tpl-mode': item.identity.mode, 'tpl-session': item.identity.session, 'tpl-ua': item.identity.userAgent ?? '', 'tpl-version': item.identity.version ?? '', 'tpl-claude-compat': item.body.claudeCompatibility, 'tpl-identity-prompt': item.body.identityprompt ?? '', 'tpl-defaults': JSON.stringify(item.body.parameters.defaults, null, 2), 'tpl-overrides': JSON.stringify(item.body.parameters.overrides, null, 2), 'tpl-remove': item.body.parameters.remove.join('\n'), 'tpl-max-body': item.limits.maxBodyBytes, 'tpl-body-timeout': item.limits.bodyTimeoutMs, 'tpl-max-metadata': item.limits.maxMetadataBytes })) $(id).value = value
+    for (const [id, value] of Object.entries({ 'tpl-detector': item.identity.detector, 'tpl-mode': item.identity.mode, 'tpl-session': item.identity.session, 'tpl-ua': item.identity.userAgent ?? '', 'tpl-version': item.identity.version ?? '', 'tpl-claude-compat': item.body.claudeCompatibility, 'tpl-prompt-cache-key': templatePromptCacheKey(item.body), 'tpl-identity-prompt': item.body.identityprompt ?? '', 'tpl-defaults': JSON.stringify(item.body.parameters.defaults, null, 2), 'tpl-overrides': JSON.stringify(item.body.parameters.overrides, null, 2), 'tpl-remove': item.body.parameters.remove.join('\n'), 'tpl-max-body': item.limits.maxBodyBytes, 'tpl-body-timeout': item.limits.bodyTimeoutMs, 'tpl-max-metadata': item.limits.maxMetadataBytes })) $(id).value = value
     $('tpl-codex-metadata').checked = item.body.codexMetadata; $('tpl-fast-beta').checked = item.body.fastBeta
     $('tpl-headers').tBodies[0].replaceChildren(); for (const header of item.headers) addHeader(header)
     text('tpl-revision', item.id ? `v${item.revision}` : '新草稿'); text('tpl-base', item.basedOn ? `${item.basedOn.id} @ ${item.basedOn.revision}` : '内置基线')
     $('tpl-readonly').hidden = item.kind !== 'builtin'
+    $('tpl-discard').hidden = item.kind === 'builtin'; $('tpl-save').hidden = item.kind === 'builtin'
+    clearFormFeedback($('template-editor'))
     for (const control of $('template-editor').querySelectorAll('.tpl-sections input,.tpl-sections select,.tpl-sections textarea,.tpl-sections button,#tpl-name')) control.disabled = item.kind === 'builtin'
     templateBaseline = JSON.stringify(templateDraft()); dirtyTemplate = isNew
     updateDraft(); if (isNew) { dirtyTemplate = true; text('tpl-dirty','新模板草稿，尚未保存'); $('tpl-save').disabled = false }
+    if (reveal) revealPanel($('template-editor'), item.kind === 'builtin' ? $('tpl-back') : $('tpl-name'))
   }
   function showHistory(id) {
     const items = state.templates.filter(item => item.id === id).sort((a,b) => b.revision-a.revision)
     text('history-title', `${items[0].name} · 版本历史`)
     $('history-body').replaceChildren(...items.map(item => { const row = node('div', undefined,'history-row'); row.append(node('span', `版本 ${item.revision} · ${item.protocols.join('/')}`)); const actions = node('div', undefined,'toolbar-actions'); actions.append(button('查看', () => { $('template-history').close(); editTemplate(item) }), button('与上一版比较', () => { const previous = items.find(other => other.revision === item.revision-1); $('history-diff').replaceChildren(...differences(previous ?? {}, item).map(change => node('p', `${change.action} ${change.path}`, 'hint'))) }), button('应用 / 回退', () => { $('template-history').close(); openBinding([], item) })); if (item.kind === 'custom') actions.append(button('删除', async () => { if (window.confirm('删除这个未被使用的版本？此操作不能撤销。')) await run('templates/remove', { id, revision: item.revision }, () => { $('template-history').close() }) },'danger')); row.append(actions); return row }))
-    $('history-diff').replaceChildren(); $('template-history').showModal()
+    $('history-diff').replaceChildren(); text('history-error', ''); $('template-history').showModal()
   }
   function selectedTestConnection() { return state.connections.find(item => item.id === $('test-connection').value) }
   function currentTestModel() { return testModelManual ? $('test-model').value.trim() : $('test-model-select').value }
@@ -720,6 +813,14 @@ async function mount() {
     for (const [title,value] of [['响应',result.responseText],['用量',result.usage],['模型列表',result.models],['出站请求（脱敏）',result.request],['变更规则',result.changes]]) if (value !== undefined) { const details = node('details',undefined,'more'); details.open = title==='响应'; details.append(node('summary',title),node('pre',typeof value === 'string' ? value : JSON.stringify(value,null,2),'code-block')); $('test-result').append(details) }
     markTestResult()
   }
+  function revealTestResult() {
+    const column = $('test-result').closest('.test-result-column') ?? $('test-result')
+    column.scrollTop = 0
+    const box = $('test-result').getBoundingClientRect()
+    if (box.top < 0 || box.top > innerHeight - 120) $('test-result').scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+    const heading = $('test-result').querySelector('h2')
+    if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }) }
+  }
   async function executeTest() {
     let payload
     try {
@@ -758,6 +859,7 @@ async function mount() {
       await run('test',payload,data => {
         renderTest(data.result, identity)
         status(data.result.status === 'passed' ? '测试完成：通过' : '测试完成：未通过，请查看本次原因')
+        revealTestResult()
       })
       if (!pending && testResultRunning) { testResultRunning = false; $('test-result').replaceChildren(node('h2', '本次测试未发送或准备失败'), node('p', '请查看配置提示。此处不是之前的请求结果。', 'hint')) }
     } catch (cause) { text('test-error',cause.message); $('test-error').focus?.(); markTestResult() }
@@ -766,10 +868,15 @@ async function mount() {
   for (const link of document.querySelectorAll('[data-view-link]')) link.addEventListener('click', event => { event.preventDefault(); navigate(link.dataset.viewLink) })
   for (const link of document.querySelectorAll('[data-leave]')) link.addEventListener('click',event => { if (!allowLeave()) event.preventDefault() })
   for (const control of document.querySelectorAll('[data-action="connection-new"]')) control.addEventListener('click', () => editConnection())
+  $('host-sync').addEventListener('click', () => { if (allowLeave()) void run('connections/sync', {}) })
   $('pro-reload').addEventListener('click', async () => { if (!allowLeave()) return; try { await refresh(false); status('已重新读取') } catch (error) { showError(error) } })
   $('pro-recover').addEventListener('click', recover)
   $('pro-close').addEventListener('click', async () => { if (!allowLeave()) return; await fetch('./api/cancel', { method:'POST',headers:{'content-type':'application/json'},body:'{}' }); document.body.replaceChildren(node('main','配置已关闭。此前保存的更改已保留。','empty')) })
-  $('connection-form').addEventListener('input', () => { try { dirtyConnection = JSON.stringify(connectionDraft()) !== connectionBaseline } catch { dirtyConnection = true } text('connection-form-state',dirtyConnection ? '未保存' : '无修改') })
+  for (const form of ['connection-form', 'binding-form', 'template-editor']) $(form).addEventListener('input', event => {
+    if (event.target.getAttribute?.('aria-invalid') === 'true') event.target.removeAttribute('aria-invalid')
+    if (!$('pro-error').hidden && !pending) showError(null)
+  })
+  $('connection-form').addEventListener('input', () => { text('connection-form-status', ''); try { dirtyConnection = JSON.stringify(connectionDraft()) !== connectionBaseline } catch { dirtyConnection = true } text('connection-form-state',dirtyConnection ? '未保存' : '无修改') })
   $('conn-auth-mode').addEventListener('change',updateAuthFields)
   $('conn-base').addEventListener('input',()=>{if(!$('connection-form').hidden)renderConnectionAccountOptions()})
   $('conn-model-fetch').addEventListener('click', () => { void fetchConnectionModels() })
@@ -780,14 +887,14 @@ async function mount() {
   for (const eventName of ['input', 'change']) $('connection-form').addEventListener(eventName, event => {
     if ((modelQuery || modelQueryReady || modelResultShown) && (['conn-base','conn-auth-mode','conn-key','conn-value','conn-protocol','conn-clear-secret'].includes(event.target.id) || event.target.hasAttribute('data-api-path'))) resetModelQuery('连接信息已改变，请重新获取模型。手填内容保留。')
   })
-  $('connection-form').addEventListener('submit', async event => { event.preventDefault(); try { const current = connectionDraft(); if (!current.name || !current.baseURL) throw new Error('请填写连接名称和地址'); await run('connections/save',{connection:current,expectedRevision:connection?.revision,clearSecrets:$('conn-clear-secret').checked ? ['key','value'] : []},data=>{dirtyConnection=false;editConnection(data.connection)}) } catch(error){text('connection-form-error',error.message)} })
+  $('connection-form').addEventListener('submit', async event => { event.preventDefault(); clearFormFeedback($('connection-form')); text('connection-form-status', ''); try { const current = connectionDraft(); if (!current.name || !current.baseURL) { showFormError('connections/save', { error: '请填写连接名称和地址', fields: current.name ? { baseURL: '' } : { name: '' } }); return } await run('connections/save',{connection:current,expectedRevision:connection?.revision,clearSecrets:$('conn-clear-secret').checked ? ['key','value'] : []},data=>{dirtyConnection=false;editConnection(data.connection,{reveal:false});text('connection-form-status',connectionSaveMessage(data))}) } catch(error){showFormError('connections/save', { error: error.message, fields: /模型协议/.test(error.message) ? { modelProtocols: '' } : {} })} })
   $('connection-cancel').addEventListener('click',()=>{if(allowLeave()){dirtyConnection=false;$('connection-panel').hidden=true}})
-  $('connection-remove').addEventListener('click',()=>{if(connection && window.confirm('删除这个连接？不会删除模板或修改旧插件。'))void run('connections/remove',{id:connection.id,expectedRevision:connection.revision},()=>{dirtyConnection=false;$('connection-panel').hidden=true})})
+  $('connection-remove').addEventListener('click',()=>{if(connection && window.confirm('删除这个连接？不会删除模板或站点账号。'))void run('connections/remove',{id:connection.id,expectedRevision:connection.revision},()=>{dirtyConnection=false;$('connection-panel').hidden=true})})
   $('binding-open').addEventListener('click',()=>openBinding())
   $('binding-template').addEventListener('change',()=>renderRevisions('binding'))
   $('binding-mode').addEventListener('change',bindingFields); $('binding-scope').addEventListener('change',bindingFields)
   $('binding-cancel').addEventListener('click',()=>{$('connection-panel').hidden=true})
-  $('binding-form').addEventListener('submit',event=>{event.preventDefault();const ids=[...$('binding-connections').querySelectorAll('input:checked')].map(input=>input.value);const mode=$('binding-mode').value;const binding=mode==='template'?{mode,id:$('binding-template').value,revision:Number($('binding-revision').value)}:{mode};if(!ids.length){text('binding-error','请选择连接');return}if(!window.confirm('应用后续新请求使用这个版本；正在进行的请求保持原版本。继续吗？'))return;void run('bindings/apply',{connectionIds:ids,binding,model:$('binding-scope').value==='model'?$('binding-model').value.trim():undefined,expectedGeneration:state.generation},()=>{$('connection-panel').hidden=true})})
+  $('binding-form').addEventListener('submit',event=>{event.preventDefault();const ids=[...$('binding-connections').querySelectorAll('input:checked')].map(input=>input.value);const mode=$('binding-mode').value;const binding=mode==='template'?{mode,id:$('binding-template').value,revision:Number($('binding-revision').value)}:{mode};clearFormFeedback($('binding-form'));if(!ids.length){showFormError('bindings/apply',{error:'请选择连接'});return}if(!window.confirm('应用后续新请求使用这个版本；正在进行的请求保持原版本。继续吗？'))return;void run('bindings/apply',{connectionIds:ids,binding,model:$('binding-scope').value==='model'?$('binding-model').value.trim():undefined,expectedGeneration:state.generation},()=>{$('connection-panel').hidden=true})})
   $('template-import').addEventListener('click',()=>{if(allowLeave())$('template-import-file').click()})
   $('template-import-file').addEventListener('change',async()=>{
     const file=$('template-import-file').files[0];$('template-import-file').value='';if(!file)return
@@ -813,8 +920,8 @@ async function mount() {
   $('tpl-header-add').addEventListener('click',()=>{addHeader();updateDraft()})
   $('template-editor').addEventListener('input',updateDraft);$('template-editor').addEventListener('change',updateDraft)
   $('tpl-back').addEventListener('click',()=>{if(allowLeave()){dirtyTemplate=false;$('template-editor').hidden=true;$('template-library').hidden=false}})
-  $('tpl-discard').addEventListener('click',()=>{if(!dirtyTemplate||window.confirm('放弃尚未保存的模板修改？')){dirtyTemplate=false;editTemplate(template,true);dirtyTemplate=false;templateBaseline=JSON.stringify(templateDraft());updateDraft()}})
-  $('template-editor').addEventListener('submit',async event=>{event.preventDefault();try{const current=templateDraft();const versions=state.templates.filter(item=>item.id===current.id);await run('templates/save',{template:current,expectedRevision:versions.length?Math.max(...versions.map(item=>item.revision)):0},data=>{dirtyTemplate=false;editTemplate(data.template)})}catch(error){text('tpl-error',error.message)}})
+  $('tpl-discard').addEventListener('click',()=>{if(!dirtyTemplate||window.confirm('放弃尚未保存的模板修改？')){dirtyTemplate=false;editTemplate(template,true,{reveal:false});dirtyTemplate=false;templateBaseline=JSON.stringify(templateDraft());updateDraft()}})
+  $('template-editor').addEventListener('submit',async event=>{event.preventDefault();try{const current=templateDraft();const versions=state.templates.filter(item=>item.id===current.id);await run('templates/save',{template:current,expectedRevision:versions.length?Math.max(...versions.map(item=>item.revision)):0},data=>{dirtyTemplate=false;editTemplate(data.template,false,{reveal:false})})}catch(error){showFormError('templates/save',{error:error.message})}})
   $('tpl-preview').addEventListener('click',()=>{try{templateDraft();openTest('',template)}catch(error){text('tpl-error',error.message)}})
   $('tpl-apply').addEventListener('click',()=>{if(template?.id&&!dirtyTemplate)openBinding([],template)})
   $('history-close').addEventListener('click',()=>$('template-history').close())
@@ -871,5 +978,7 @@ async function mount() {
     finally{if(!loading){$('test-cancel').disabled=false;text('test-cancel','取消测试')}}
   })
   window.addEventListener('beforeunload',event=>{if(isDirty()||locked()){event.preventDefault();event.returnValue=''}})
-  try { await refresh();navigate(location.hash.slice(1)||'overview',true);testFields();resetSample();$('pro-shell').dataset.ready='true';status('配置已读取。保存版本与应用连接分别执行。') } catch(error){showError(error);status('无法读取 UA PRO 配置')}
+  // Back/forward and hand-edited hashes go through the same draft guard as the sidebar links.
+  window.addEventListener('hashchange',()=>{if($('pro-shell').dataset.ready==='true'&&viewFromHash(location.hash)!==view)navigate(location.hash)})
+  try { await refresh();navigate(location.hash,true);if(location.hash!==`#${view}`)history.replaceState(null,'',`#${view}`);testFields();resetSample();$('pro-shell').dataset.ready='true';status('配置已读取。保存版本与应用连接分别执行。') } catch(error){showError(error);status('无法读取 UA PRO 配置')}
 }

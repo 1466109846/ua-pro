@@ -1,14 +1,15 @@
 import { createHash } from 'node:crypto'
 import { createUATestRunner } from './ua-tests.mjs'
 import { validateTemplate } from './ua-transform.mjs'
-import { lookupUAModels, readModelCatalog } from './ua-runtime.mjs'
+import { lookupUAModels, readModelCatalog, modelQueryScope } from './ua-runtime.mjs'
 import { createUAModelCatalog } from './ua-model-catalog.mjs'
 import { matchesAccountSite } from '../lib/ua-protocol.mjs'
+import { createKeyUsage } from './key-usage.mjs'
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const failure = (message, status = 400) => Object.assign(new Error(message), { status })
 
-export function createUAService({ store, legacyStore, accountManager, readAuth, fetchImpl, modelFetchFor, modelCatalog = createUAModelCatalog(store.path), onConnectionSaved, runtime = () => ({ mode: 'standalone', observed: [] }) }) {
+export function createUAService({ store, legacyStore, accountManager, readAuth, fetchImpl, modelFetchFor, modelCatalog = createUAModelCatalog(store.path), onConnectionSaved, syncConnections, runtime = () => ({ mode: 'standalone', observed: [] }) }) {
   const test = createUATestRunner({ store, readAuth, fetchImpl, modelFetchFor })
   const initialized = () => store.initialize()
   return {
@@ -25,7 +26,12 @@ export function createUAService({ store, legacyStore, accountManager, readAuth, 
       const siteAccounts = accountManager ? (await accountManager.list()).accounts.map(account => ({ id: account.id, name: account.name,
         siteUrl: account.siteUrl, siteType: account.siteType ?? 'newapi', userId: account.userId, enabled: account.enabled,
         checkinEnabled: account.checkinEnabled, schedule: account.schedule })) : []
-      return { ...snapshot, modelCatalogs, siteAccounts, runtime: runtime() }
+      return { ...snapshot, modelCatalogs, siteAccounts, runtime: await runtime(snapshot) }
+    },
+    async accountConnections() {
+      await initialized()
+      return (await store.snapshot()).connections.map(connection => ({ id: connection.id, name: connection.name, baseURL: connection.baseURL,
+        revision: connection.revision, enabled: connection.enabled, newApiAccountId: connection.newApiAccountId ?? '' }))
     },
     async execute(action, data, { signal } = {}) {
       await initialized()
@@ -33,6 +39,15 @@ export function createUAService({ store, legacyStore, accountManager, readAuth, 
       if (action === 'templates/save') return store.saveTemplate(data)
       if (action === 'templates/archive') return store.archiveTemplate(data)
       if (action === 'templates/remove') return store.removeTemplate(data)
+      if (action === 'connections/usage') {
+        if (data.confirmNetwork !== true) throw failure('读取连接余额需要明确确认')
+        const snapshot = await store.snapshot({ secrets: true })
+        const connection = snapshot.connections.find(item => item.id === data.connectionId)
+        if (!connection || !connection.enabled) throw failure('连接不存在或已停用', 404)
+        const usageFetch = modelFetchFor ? modelFetchFor(await modelQueryScope(connection, readAuth)) : fetchImpl
+        const usage = await createKeyUsage({ fetchImpl: usageFetch, readAuth })(connection)
+        return { connectionId: connection.id, revision: connection.revision, usage, at: new Date().toISOString() }
+      }
       if (action === 'connections/models') {
         if (data.confirmNetwork !== true) throw failure('获取模型需要明确确认')
         const connection = await store.prepareConnection(data)
@@ -48,13 +63,17 @@ export function createUAService({ store, legacyStore, accountManager, readAuth, 
           if (error.code === 'upstream-http') throw Object.assign(failure(`${error.message}，请检查地址、协议和凭据`), { code: error.code })
           if ([400, 409].includes(error.status)) {
             if (['dns', 'connection-refused', 'connection-reset', 'timeout', 'tls', 'network'].includes(error.code)) {
-              const route = runtime().mode === 'host' ? '当前管理会话的代理可能与宿主账号代理不同。' : '独立工具不继承 Magpie 的账号代理；可从 Magpie 打开 UA PRO 管理后核对。'
+              const route = (await runtime()).mode === 'host' ? '当前管理会话的代理可能与宿主账号代理不同。' : '独立工具不继承 Magpie 的账号代理；可从 Magpie 打开 UA PRO 管理后核对。'
               error.message += `。${route}`
             }
             throw error
           }
           throw failure('模型列表读取未完成，请重新打开管理页后重试', 400)
         }
+      }
+      if (action === 'connections/sync') {
+        if (!syncConnections) throw failure('独立工具不能直接写入 Magpie；请从宿主打开 UA PRO 管理后同步', 409)
+        return syncConnections()
       }
       if (action === 'connections/save') {
         if (data.connection?.newApiAccountId) {
@@ -64,8 +83,12 @@ export function createUAService({ store, legacyStore, accountManager, readAuth, 
         }
         const result = await store.saveConnection(data)
         if (onConnectionSaved) {
-          try { await onConnectionSaved(result.connection); return { ...result, registration: 'registered', activation: 'pending-runtime-observation' } }
-          catch { return { ...result, registration: 'pending-reload', activation: 'pending-reload', message: '连接已保存，宿主注册未确认，请重载插件后核对' } }
+          try {
+            const host = await onConnectionSaved(result.connection)
+            if (host?.status === 'reload-required') return { ...result, registration: 'pending-reload', activation: 'pending-reload', host, message: host.message }
+            if (host && host.status !== 'registered') return { ...result, registration: 'pending-reload', activation: 'pending-reload', host, message: host.message || '连接已保存，宿主账号尚未确认，请同步或重载后核对' }
+            return { ...result, registration: 'registered', activation: 'pending-runtime-observation', ...(host ? { host } : {}) }
+          } catch { return { ...result, registration: 'pending-reload', activation: 'pending-reload', message: '连接已保存，宿主注册未确认，请重载插件后核对' } }
         }
         return { ...result, registration: 'pending-host-load', activation: 'pending-runtime-observation' }
       }

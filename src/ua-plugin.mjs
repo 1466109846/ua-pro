@@ -20,6 +20,7 @@ const PREFIX = 'ua-pro:connection:'
 const observed = new Map()
 const stores = new Map()
 const modelRoutes = new Map()
+const loadedProviders = new Map()
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 20)
 export function uaStorePath(options = {}, env = process.env) {
   const path = options.uaFile ?? env.UA_PRO_FILE ?? fileURLToPath(new URL('../runtime/ua-pro.json', import.meta.url))
@@ -40,6 +41,8 @@ export async function createUAPlugin(input = {}, options = {}, dependencies = {}
   const store = dependencies.uaStore ?? sharedStore(path)
   await store.initialize()
   const id = siteId ? `ua-pro-${siteId}` : 'ua-pro'
+  if (!loadedProviders.has(store.path)) loadedProviders.set(store.path, new Set())
+  loadedProviders.get(store.path).add(id)
   const legacyStore = dependencies.legacyStore ?? createProfileStore(resolveProfilePath({ configPath: options.profileFile }))
   const accountManager = dependencies.accountManager ?? createAccountManager({ path: join(dirname(path), 'accounts.json') })
   if (input.magpie && !siteId) (dependencies.startScheduler ?? ensureCheckinScheduler)({ accountManager, stateDirectory: join(dirname(path), 'schedule-claims'), onError: () => {} })
@@ -54,16 +57,44 @@ export async function createUAPlugin(input = {}, options = {}, dependencies = {}
     catch (error) { if (error.code === 'ENOENT') return {}; throw new Error('无法读取宿主账号，停止操作以保护已有凭据') }
   }
   const readAuth = async (provider, account) => (await auths())[account || provider]
-  const register = async connection => {
-    if (!input.client?.auth?.set || connection.auth?.source === 'host') return
+  const connectionStatus = async (connection, all = {}) => {
     const provider = providerOf(connection)
-    const account = `${provider}#${digest(connection.id)}`
-    const existing = (await auths())[account]
-    const key = PREFIX + connection.id
-    if (existing && existing.key !== key) throw new Error('目标宿主账号已被其他凭据占用')
-    if (existing) return
-    const response = await input.client.auth.set({ path: { id: account }, body: { type: 'api', key, accountId: connection.name, metadata: { uaConnectionId: connection.id } } })
-    if (response?.data !== true) throw new Error('宿主未确认连接注册，请重载并核对')
+    const account = connection.auth?.source === 'host' ? connection.auth.account : `${provider}#${digest(connection.id)}`
+    const base = { connectionId: connection.id, provider, account, name: connection.name }
+    if (!connection.enabled) return { ...base, status: 'disabled' }
+    if (!loadedProviders.get(store.path)?.has(provider)) return { ...base, status: 'reload-required', message: '新增独立站点需要在 Magpie 重载此插件后载入' }
+    if (connection.auth?.source === 'host') {
+      const saved = all[account]
+      const endpoint = saved?.metadata?.baseURL ?? saved?.metadata?.endpoint
+      if (saved?.type !== 'api' || !saved.key || !endpoint || siteRoot(endpoint) !== siteRoot(connection.baseURL)) return { ...base, status: 'unregistered', message: '该连接引用的宿主账号尚未确认，请重新打开账号配置' }
+      return { ...base, status: 'registered' }
+    }
+    const saved = all[account]
+    if (saved && (saved.type !== 'api' || saved.key !== PREFIX + connection.id)) return { ...base, status: 'conflict', message: '目标宿主账号已被其他凭据占用，未覆盖' }
+    return { ...base, status: saved ? 'registered' : 'unregistered' }
+  }
+  const register = async connection => {
+    const all = await auths()
+    const current = await connectionStatus(connection, all)
+    if (current.status === 'conflict') throw new Error(current.message)
+    if (['disabled', 'reload-required'].includes(current.status) || connection.auth?.source === 'host') return current
+    if (!input.client?.auth?.set) return { ...current, status: 'host-unavailable', message: '请从 Magpie 打开管理页后同步连接' }
+    const existing = all[current.account]
+    if (current.status === 'registered' && existing.accountId === connection.name && existing.metadata?.uaConnectionId === connection.id) return current
+    const body = { ...existing, type: 'api', key: PREFIX + connection.id, accountId: connection.name, metadata: { ...existing?.metadata, uaConnectionId: connection.id } }
+    const response = await input.client.auth.set({ path: { id: current.account }, body })
+    const confirmed = (await auths())[current.account]
+    if (response?.data !== true || !isDeepStrictEqual(confirmed, body)) throw new Error('宿主未确认连接注册，请重载并核对')
+    return { ...current, status: 'registered' }
+  }
+  const syncConnections = async () => {
+    const snapshot = await store.snapshot()
+    const connections = []
+    for (const connection of snapshot.connections) {
+      try { connections.push(await register(connection)) }
+      catch { connections.push({ connectionId: connection.id, provider: providerOf(connection), status: 'failed', message: '宿主同步未完成；配置和凭据保留，请重载插件后核对' }) }
+    }
+    return { connections, message: connections.some(item => item.status === 'reload-required') ? '已同步可用账号；新增独立站点需要重载 UA PRO 插件' : '宿主同步结果已核对' }
   }
   const routeKey = scope => `${store.path}:${scope}`
   const modelFetchFor = scope => {
@@ -74,7 +105,13 @@ export async function createUAPlugin(input = {}, options = {}, dependencies = {}
     return fetchImpl
   }
   const service = createUAService({ store, legacyStore, accountManager, fetchImpl, readAuth, modelCatalog, modelFetchFor, onConnectionSaved: input.client?.auth?.set ? register : undefined,
-    runtime: () => ({ mode: input.magpie ? 'host' : 'standalone', observed: [...observed.values()].filter(item => item.provider === id) }) })
+    syncConnections: input.client?.auth?.set ? syncConnections : undefined,
+    runtime: async snapshot => {
+      const all = await auths()
+      return { mode: input.magpie ? 'host' : 'standalone', storagePath: store.path,
+        connections: await Promise.all((snapshot?.connections ?? []).map(connection => connectionStatus(connection, all))),
+        observed: [...observed.values()].filter(item => item.provider === id) }
+    } })
   let declared = {}
   const getNativeConnection = async (auth, provider = {}) => {
     if (auth?.type !== 'api' || typeof auth.key !== 'string' || !auth.key.trim()) return null
