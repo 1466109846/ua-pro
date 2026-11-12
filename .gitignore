@@ -1,11 +1,13 @@
 runtime/
 node_modules/
+releases/
 tests/
 scripts/
 docs/
 examples/
 .agents/
 AGENTS.md
+CLAUDE.md
 VERIFICATION.md
 RESEARCH.md
 PARITY.md

@@ -9,9 +9,9 @@ import { createKeyUsage } from './key-usage.mjs'
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const failure = (message, status = 400) => Object.assign(new Error(message), { status })
 
-export function createUAService({ store, legacyStore, accountManager, readAuth, fetchImpl, modelFetchFor, modelCatalog = createUAModelCatalog(store.path), onConnectionSaved, syncConnections, runtime = () => ({ mode: 'standalone', observed: [] }) }) {
+export function createUAService({ store, legacyStore, accountManager, readAuth, fetchImpl, modelFetchFor, modelCatalog = createUAModelCatalog(store.path), onConnectionSaved, onConnectionRemoving, removeHostAccount, syncConnections, prepareState, runtime = () => ({ mode: 'standalone', observed: [] }) }) {
   const test = createUATestRunner({ store, readAuth, fetchImpl, modelFetchFor })
-  const initialized = () => store.initialize()
+  const initialized = async () => { await store.initialize(); await prepareState?.() }
   return {
     async state() {
       await initialized()
@@ -92,7 +92,11 @@ export function createUAService({ store, legacyStore, accountManager, readAuth, 
         }
         return { ...result, registration: 'pending-host-load', activation: 'pending-runtime-observation' }
       }
-      if (action === 'connections/remove') return store.removeConnection(data)
+      if (action === 'connections/remove') return store.removeConnection(data, { beforeRemove: onConnectionRemoving })
+      if (action === 'host-accounts/remove') {
+        if (!removeHostAccount) throw failure('请从宿主打开 UA PRO 管理后操作', 409)
+        return removeHostAccount(data)
+      }
       if (action === 'bindings/apply') return { ...await store.applyBinding(data), activation: 'pending-runtime-observation' }
       if (action === 'routes/apply') return { ...await store.applyModelRoute(data), activation: 'pending-reload', message: '模型上游协议和模板已保存；请在 Magpie 重新获取模型或重载插件后使用' }
       if (action === 'test') return { result: await test(data, { signal }) }

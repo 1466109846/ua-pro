@@ -22,7 +22,7 @@ export function createKeyUsage({ fetchImpl = globalThis.fetch, readAuth } = {}) 
         if (!response.ok) stop('Key 用量查询失败，请检查站点服务', 'http')
         const body = await boundedResponse(response, { limit: 1024 * 1024, signal: controller.signal })
         let result
-        try { result = JSON.parse(body) } catch { throw fail('站点返回的 Key 用量数据无效') }
+        try { result = JSON.parse(body.replace(/^\uFEFF/, '')) } catch { throw fail('Key 用量接口返回的不是 JSON（可能是网页、验证页或空响应）；这不代表 Key 无效。账号余额请绑定已配置 Cookie 的站点账号') }
         if (!result || typeof result !== 'object' || Array.isArray(result) || result.success === false || result.code === false) throw fail('站点未确认 Key 用量查询成功')
         return result
       })()])

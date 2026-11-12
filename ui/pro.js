@@ -150,6 +150,61 @@ export function connectionHostView(state = {}, connection = {}) {
   if (host?.status === 'reload-required') return { label: '需重载插件', detail: `新增供应商 ${host.provider || provider} 尚未载入，请在 Magpie 重载 UA PRO` }
   return { label: host?.status === 'conflict' ? '账号冲突，未覆盖' : '尚未同步到宿主', detail: host?.message || `点击“同步到宿主”注册到 ${provider} 的账号列表` }
 }
+const HOST_ACCOUNT_STATUSES = new Set(['mapped', 'unresolved', 'unsupported'])
+const HOST_ACCOUNT_LABELS = { mapped: '已关联', unresolved: '未关联', unsupported: '不支持', unknown: '状态未知' }
+const hostAccountText = value => typeof value === 'string' ? value.trim() : ''
+const hostAccountList = value => Array.isArray(value) ? value : []
+export function hostAccountStatus(entry = {}) {
+  return HOST_ACCOUNT_STATUSES.has(entry?.status) ? entry.status : 'unknown'
+}
+export function hostAccountView(state = {}, entry = {}) {
+  const status = hostAccountStatus(entry)
+  const account = hostAccountText(entry?.account)
+  const name = hostAccountText(entry?.name) || account || '未命名宿主账号'
+  const message = hostAccountText(entry?.message)
+  const base = { status, account, name, label: HOST_ACCOUNT_LABELS[status], detail: '', connectionName: '', removable: false }
+  if (status === 'mapped') {
+    const connection = hostAccountList(state?.connections).find(item => item && item.id === entry?.connectionId)
+    if (!connection) return { ...base, status: 'unresolved', label: '关联失效', detail: message || '宿主标记为已关联，但当前 WebUI 中没有这个连接；不会当作可用连接' }
+    const connectionName = hostAccountText(connection.name) || '未命名连接'
+    return { ...base, connectionName, detail: `对应 WebUI 连接：${connectionName}` }
+  }
+  if (status === 'unresolved') return {
+    ...base,
+    removable: entry?.removable === true && Boolean(account) && Boolean(hostAccountText(entry?.fingerprint)),
+    detail: message || '宿主中保存了这个账号，但没有对应的 WebUI 连接',
+  }
+  if (status === 'unsupported') return { ...base, detail: message || '宿主账号类型不受支持，未建立连接' }
+  return { ...base, detail: message || '宿主未提供可识别状态；不会当作可用连接' }
+}
+export function hostAccountSummary(state = {}) {
+  const runtime = state?.runtime && typeof state.runtime === 'object' ? state.runtime : {}
+  const known = Array.isArray(runtime.hostAccounts)
+  const connectionsKnown = Array.isArray(state?.connections)
+  const accounts = known ? runtime.hostAccounts : []
+  const connections = connectionsKnown ? state.connections : []
+  const rows = accounts.map(entry => hostAccountView(state, entry))
+  const count = status => rows.filter(row => row.status === status).length
+  const attention = rows.filter(row => row.status !== 'mapped')
+  const counts = connectionsKnown ? `WebUI 连接 ${connections.length} 个` : 'WebUI 连接数未知'
+  const text = known
+    ? `宿主已保存账号 ${accounts.length} 个 · ${counts}${attention.length ? ` · 未关联或失效 ${attention.length} 个` : accounts.length ? ' · 全部已关联' : ' · 暂无宿主账号'}`
+    : `宿主账号清单未知 · ${counts}；请重载插件或刷新宿主状态`
+  return {
+    known,
+    connectionsKnown,
+    hostAccounts: accounts.length,
+    webuiConnections: connections.length,
+    mapped: count('mapped'),
+    unresolved: count('unresolved'),
+    unsupported: count('unsupported'),
+    unknown: count('unknown'),
+    attention,
+    attentionText: attention.length ? `未关联或失效：${attention.map(row => `${row.name}（${row.label}）`).join('、')}` : '',
+    rows,
+    text,
+  }
+}
 export function connectionSaveMessage(result = {}) {
   if (result.message) return result.message
   if (result.registration === 'registered') return `连接已保存并注册到宿主 ${result.host?.provider || 'UA PRO'}；在供应商的账号列表中查看并刷新模型`
@@ -340,10 +395,44 @@ async function mount() {
     if (binding?.mode === 'template') return `${binding.id} @ ${binding.revision}`
     return binding?.mode === 'auto' ? '自动：固定 Codex / Claude 版本' : '普通转发'
   }
+  function removeHostAccount(entry) {
+    if (!hostAccountView(state, entry).removable) return
+    if (!window.confirm('仅移除这个失效宿主登录引用，不删除站点账号、模板或其他连接。确认继续吗？')) return
+    void run('host-accounts/remove', { account: entry.account, expectedFingerprint: entry.fingerprint, confirmRemoval: true })
+  }
+  function renderHostAccounts() {
+    const panel = $('overview-host-accounts')
+    panel.hidden = state.runtime?.mode !== 'host'
+    if (panel.hidden) return
+    const summary = hostAccountSummary(state)
+    text('overview-host-account-summary', summary.text)
+    text('overview-host-account-attention', summary.attentionText)
+    $('overview-host-account-attention').hidden = !summary.attentionText
+    if (!summary.known) {
+      $('overview-host-account-list').replaceChildren(node('p', '宿主未提供账号清单，无法核对账号与连接的对应关系；不会把连接列表当作宿主账号列表。', 'empty-note'))
+      return
+    }
+    if (!summary.rows.length) {
+      $('overview-host-account-list').replaceChildren(node('p', '宿主尚未保存 UA PRO 账号。', 'empty-note'))
+      return
+    }
+    $('overview-host-account-list').replaceChildren(...state.runtime.hostAccounts.map(entry => {
+      const view = hostAccountView(state, entry)
+      const row = node('div', undefined, 'overview-item'), info = node('div'), actions = node('div', undefined, 'toolbar-actions')
+      info.append(node('strong', view.name))
+      if (view.account && view.account !== view.name) info.append(node('small', view.account, 'mono'))
+      info.append(node('small', view.detail))
+      actions.append(node('span', view.label, view.status === 'mapped' ? 'tag' : 'tag warn'))
+      if (view.removable) actions.append(button('移除失效宿主账号', () => removeHostAccount(entry), 'danger'))
+      row.append(info, actions)
+      return row
+    }))
+  }
   function renderState() {
     text('pro-generation', state.generation)
     text('pro-version', state.application?.version || '版本未知，请重新打开插件管理')
     text('pro-runtime', state.runtime?.mode === 'host' ? 'Magpie 插件宿主' : '独立配置工具')
+    text('pro-storage-path', hostAccountText(state.runtime?.storagePath) || '宿主未提供实际存储路径')
     $('overview-metrics').replaceChildren(...[
       [state.connections.filter(item => item.enabled).length, '启用连接'],
       [templateGroups(state.templates).filter(items => items[0].kind === 'custom').length, '自定义模板'],
@@ -359,6 +448,7 @@ async function mount() {
       return row
     }))
     if (!state.connections.length) $('overview-connections').replaceChildren(node('p', '暂无连接，添加后在这里显示注册与请求状态。', 'empty-note'))
+    renderHostAccounts()
     $('connection-list').replaceChildren(...(state.connections.length ? [] : [(() => { const empty = node('div', undefined, 'empty'); empty.append(node('h2', '还没有连接'), node('p', '点击右上角“添加连接”，填写站点地址和 key。保存后可在此编辑、应用模板或测试。')); return empty })()]), ...state.connections.map(item => { const card = node('article', undefined, 'conn-card'), summary = connectionCardSummary(item); card.append(node('h3', item.name), tag(item.enabled ? '启用' : '停用'), node('p', summary.address, 'mono'), node('p', summary.detail), node('p', bindingLabel(item.binding)), node('p', connectionAccountBindingLabel(item.newApiAccountId, state.siteAccounts), 'hint'), (() => { const link = node('a', '管理签到账号 / 补 Cookie 或登录凭据'); link.href = './accounts'; link.addEventListener('click', event => { if (!allowLeave()) event.preventDefault() }); return link })()); const actions = node('div', undefined, 'card-actions'); actions.append(button('编辑', () => editConnection(item)), button('应用模板', () => openBinding([item.id])), button('测试', () => openTest(item.id))); card.append(actions); return card }))
     renderTemplates()
     renderConnectionSelectors()
@@ -889,7 +979,7 @@ async function mount() {
   })
   $('connection-form').addEventListener('submit', async event => { event.preventDefault(); clearFormFeedback($('connection-form')); text('connection-form-status', ''); try { const current = connectionDraft(); if (!current.name || !current.baseURL) { showFormError('connections/save', { error: '请填写连接名称和地址', fields: current.name ? { baseURL: '' } : { name: '' } }); return } await run('connections/save',{connection:current,expectedRevision:connection?.revision,clearSecrets:$('conn-clear-secret').checked ? ['key','value'] : []},data=>{dirtyConnection=false;editConnection(data.connection,{reveal:false});text('connection-form-status',connectionSaveMessage(data))}) } catch(error){showFormError('connections/save', { error: error.message, fields: /模型协议/.test(error.message) ? { modelProtocols: '' } : {} })} })
   $('connection-cancel').addEventListener('click',()=>{if(allowLeave()){dirtyConnection=false;$('connection-panel').hidden=true}})
-  $('connection-remove').addEventListener('click',()=>{if(connection && window.confirm('删除这个连接？不会删除模板或站点账号。'))void run('connections/remove',{id:connection.id,expectedRevision:connection.revision},()=>{dirtyConnection=false;$('connection-panel').hidden=true})})
+  $('connection-remove').addEventListener('click',()=>{if(connection && window.confirm('删除这个连接？会同时注销它在宿主中的账号引用，不会删除模板、站点账号或其他连接。'))void run('connections/remove',{id:connection.id,expectedRevision:connection.revision},()=>{dirtyConnection=false;$('connection-panel').hidden=true})})
   $('binding-open').addEventListener('click',()=>openBinding())
   $('binding-template').addEventListener('change',()=>renderRevisions('binding'))
   $('binding-mode').addEventListener('change',bindingFields); $('binding-scope').addEventListener('change',bindingFields)

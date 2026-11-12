@@ -13,9 +13,10 @@ async function main() {
     return;
   }
   const store = createProfileStore(resolveProfilePath({ configPath: args.configPath }));
-  const accountManager = createAccountManager({ path: join(dirname(store.path), 'accounts.json') });
   const uaStore = createUAStore(process.env.UA_PRO_FILE || join(dirname(store.path), 'ua-pro.json'));
-  const uaService = createUAService({ store: uaStore, legacyStore: store, accountManager });
+  const accountManager = createAccountManager({ path: join(dirname(uaStore.path), 'accounts.json') });
+  const uaService = createUAService({ store: uaStore, legacyStore: store, accountManager,
+    runtime: () => ({ mode: 'standalone', storagePath: uaStore.path, observed: [] }) });
   const session = await startSetupServer({ store, accountManager, uaService, port: args.port, finishOnSave: false });
   console.log(`配置页面：${session.url}\n账号管理：${new URL('accounts', session.url).href}\n配置文件：${store.path}\n页面链接仅本次有效，请勿分享。`);
   if (args.open && !await openBrowser(session.url)) console.log('未找到可用的浏览器，请手动打开上面的本地链接。');

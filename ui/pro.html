@@ -53,6 +53,12 @@
           <div class="panel-head"><h2>连接与生效状态</h2><a id="overview-manage-connections" href="#connections" data-view-link="connections" class="link">管理连接</a></div>
           <div id="overview-connections" class="overview-list"></div>
         </div>
+        <div id="overview-host-accounts" class="panel" hidden>
+          <div class="panel-head"><h2>宿主账号与连接对应关系</h2><span id="overview-host-account-summary" class="hint"></span></div>
+          <div id="overview-host-account-list" class="overview-list"></div>
+          <p id="overview-host-account-attention" class="hint" hidden></p>
+          <p class="hint">只显示账号与连接的对应关系，不显示 Key、Cookie 或原始认证数据；未关联或失效账号不会作为可用连接显示。</p>
+        </div>
         <p class="note">普通连接位于 Magpie 的 UA PRO 供应商账号列表；勾选独立显示后才会有单独供应商。注册状态与实际请求记录分别显示，页面测试不会自动代表宿主已载入。</p>
       </section>
 
@@ -306,6 +312,11 @@
             <h2>其他页面</h2>
             <p class="hint">在独立页面管理站点账号、余额与签到，打开前会确认未保存的草稿。</p>
             <div class="link-row"><a href="./accounts" class="btn ghost" data-leave="accounts">余额与签到</a></div>
+          </div>
+          <div class="panel wide">
+            <h2>存储位置</h2>
+            <p class="hint">实际存储路径：<span id="pro-storage-path" class="mono">读取中</span></p>
+            <p class="hint">默认宿主持久目录在升级或重装后保留；显式指定路径或独立运行时，请自行保留对应数据目录。页面不会显示 Key、Cookie 或原始认证数据。</p>
           </div>
           <div class="panel wide">
             <h2>本次配置会话</h2>

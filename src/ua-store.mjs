@@ -567,13 +567,14 @@ export function createUAStore(path, { io = fs, uuid = randomUUID } = {}) {
     });
   }
 
-  async function removeConnection({ id, expectedRevision } = {}) {
-    return update((state) => {
+  async function removeConnection({ id, expectedRevision } = {}, { beforeRemove } = {}) {
+    return update(async (state) => {
       if (!isText(id)) throw fail('连接 id 缺失', 400, 'id');
       const connectionId = id.trim();
       const existing = state.connections.find((item) => item.id === connectionId);
       if (!existing) throw fail('连接不存在', 404, 'id');
       if (expectedRevision !== undefined && expectedRevision !== existing.revision) throw fail('连接已被其他窗口更新，请重新读取', 409, 'expectedRevision');
+      await beforeRemove?.(publicConnection(existing, false));
       state.connections = state.connections.filter((item) => item.id !== connectionId);
       return { changed: true, value: (next) => ({ id: connectionId, generation: next.generation }) };
     });
