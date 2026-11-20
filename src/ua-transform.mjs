@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import { applyParameters, compileParameters, isObject } from '../lib/parameters.mjs';
 
-// Pinned to sub2api-magpie-plugin a22d079b (0.4.16), not a live client version.
+// Historical @1 templates from sub2api-magpie-plugin a22d079b (0.4.16).
 const CODEX_VERSION = '0.159.0';
-const CLAUDE_VERSION = '2.1.296';
+const CLAUDE_V1_VERSION = '2.1.296';
+const CLAUDE_V2_VERSION = '2.1.329';
 const IDENTITY_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
 const FAST_BETA = 'fast-mode-2026-02-01';
 const LIMITS = { maxBodyBytes: 32 << 20, bodyTimeoutMs: 15000, maxMetadataBytes: 1 << 20 };
@@ -183,7 +184,7 @@ export function builtinTemplates() {
   const codex = make('builtin.codex', 'Codex', 'responses', 'codex-ua', CODEX_VERSION, 'codex_cli_rs/{{client.version}} ({{platform}}; {{arch}}) {{terminal}}');
   codex.headers = [header('openai-beta', 'set-if-missing', 'responses=experimental'), header('originator', 'set-if-missing', 'codex_cli_rs'), header('version', 'set-if-missing', '{{client.version}}')];
   codex.body.codexMetadata = true;
-  const claude = make('builtin.claude-code', 'Claude Code', 'anthropic', 'claude-ua', CLAUDE_VERSION, `claude-cli/${CLAUDE_VERSION} (external, cli)`);
+  const claude = make('builtin.claude-code', 'Claude Code', 'anthropic', 'claude-ua', CLAUDE_V1_VERSION, `claude-cli/${CLAUDE_V1_VERSION} (external, cli)`);
   claude.headers = [header('x-app', 'set-if-missing', 'cli'), header('anthropic-version', 'set-if-missing', '2023-06-01')];
   // These empty-value rules apply to third-party Messages inference only.
   claude.headers.push(...[header('x-app', 'set-if-empty', 'cli', 'third-party'), header('anthropic-version', 'set-if-empty', '2023-06-01', 'third-party'), header('anthropic-beta', 'set-if-empty', 'claude-code-20250219', 'third-party')].map(h => ({ ...h, operations: ['messages'] })));
@@ -191,7 +192,33 @@ export function builtinTemplates() {
   const custom = make('custom.claude-vscode-2316', 'Claude Code VS Code 2.1.316', 'anthropic', 'claude-ua', '2.1.316', 'claude-cli/2.1.316 (external, claude-vscode, agent-sdk/0.3.316)');
   custom.kind = 'custom'; custom.basedOn = { id: claude.id, revision: 1 }; custom.identity.mode = 'preserve'; custom.identity.session = 'preserve';
   custom.headers = Object.entries({ accept: 'application/json', 'anthropic-beta': VS_BETA, 'anthropic-dangerous-direct-browser-access': 'true', 'anthropic-version': '2023-06-01', 'user-agent': custom.identity.userAgent, 'x-app': 'cli', 'x-stainless-arch': 'x64', 'x-stainless-lang': 'js', 'x-stainless-os': 'Windows', 'x-stainless-package-version': '0.128.0', 'x-stainless-retry-count': '0', 'x-stainless-runtime': 'node', 'x-stainless-runtime-version': 'v26.12.1', 'x-stainless-timeout': '300' }).map(([n, v]) => header(n, 'set', v));
-  return [codex, claude, custom];
+  // Windows x64 loopback capture with the official 2.1.329 CLI (see RESEARCH.md).
+  const claude2 = make(claude.id, claude.name, 'anthropic', 'claude-ua', CLAUDE_V2_VERSION, `claude-cli/${CLAUDE_V2_VERSION} (external, sdk-cli)`);
+  claude2.revision = 2;
+  claude2.basedOn = { id: claude.id, revision: claude.revision };
+  claude2.identity.session = 'host';
+  claude2.headers = [header('x-app', 'set-if-empty', 'cli', 'third-party'), header('anthropic-version', 'set-if-empty', '2023-06-01', 'third-party')];
+  const messagesHeaders = {
+    accept: 'application/json',
+    'content-type': 'application/json',
+    'anthropic-beta': [
+      'claude-code-20250219', 'interleaved-thinking-2025-05-14', 'context-management-2025-06-27',
+      'per-turn-control-2026-07-01', 'mid-conversation-tool-changes-2026-07-01', 'thinking-token-count-2026-05-13',
+      'advanced-tool-use-2025-11-20', 'effort-2025-11-24',
+    ].join(','),
+    'anthropic-dangerous-direct-browser-access': 'true',
+    'x-stainless-arch': 'x64',
+    'x-stainless-lang': 'js',
+    'x-stainless-os': 'Windows',
+    'x-stainless-package-version': '0.128.0',
+    'x-stainless-runtime': 'node',
+    'x-stainless-runtime-version': 'v26.12.1',
+    'x-stainless-timeout': '600',
+  };
+  for (const [name, value] of Object.entries(messagesHeaders)) {
+    claude2.headers.push({ ...header(name, 'set-if-empty', value, 'third-party'), operations: ['messages'] });
+  }
+  return [codex, claude, claude2, custom];
 }
 
 const hash = (...parts) => createHash('sha256').update(JSON.stringify(parts)).digest('hex');

@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks'
 import { prepareUpstream, protocolForModel, lookupUAModels, readModelCatalog } from './ua-runtime.mjs'
 import { createTestPlan, createTestSample, validateTestSample } from '../lib/ua-test-plan.mjs'
+import { DEFAULT_AUTO_RESOLVED } from '../lib/ua-protocol.mjs'
 import { createUAModelCatalog } from './ua-model-catalog.mjs'
 import { validateTemplate } from './ua-transform.mjs'
 
@@ -42,7 +43,7 @@ export function createUATestRunner({ store, fetchImpl = globalThis.fetch, readAu
     if (raw.expectedGeneration !== undefined && raw.expectedGeneration !== snapshot.generation) throw Object.assign(error('配置已在确认后改变，请重新读取并核对本次请求'), { status: 409 })
     if (connection && raw.expectedConnectionRevision !== undefined && raw.expectedConnectionRevision !== connection.revision) throw Object.assign(error('当前连接已改变，请重新读取后测试'), { status: 409 })
     if (raw.kind !== 'preview' && !connection) throw error('请选择要直测的连接')
-    const selected = connection ?? { id: 'preview-only', name: '本地预览', enabled: true, baseURL: 'https://preview.invalid', protocol: raw.protocol ?? 'anthropic', apiPaths: {}, modelProtocols: {}, models: [], auth: { source: 'stored', mode: 'none', key: '', value: '' }, binding: { mode: 'auto', resolvedVersions: { responses: { id: 'builtin.codex', revision: 1 }, anthropic: { id: 'builtin.claude-code', revision: 1 } } }, modelBindings: {} }
+    const selected = connection ?? { id: 'preview-only', name: '本地预览', enabled: true, baseURL: 'https://preview.invalid', protocol: raw.protocol ?? 'anthropic', apiPaths: {}, modelProtocols: {}, models: [], auth: { source: 'stored', mode: 'none', key: '', value: '' }, binding: { mode: 'auto', resolvedVersions: DEFAULT_AUTO_RESOLVED }, modelBindings: {} }
     let suppliedModel
     try {
       const supplied = typeof raw.request?.body === 'string' ? JSON.parse(raw.request.body) : raw.request?.body

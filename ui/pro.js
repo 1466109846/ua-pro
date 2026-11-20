@@ -1,4 +1,4 @@
-import { createTestPlan, createTestSample, validateTestSample } from '../lib/ua-test-plan.mjs'
+import { createTestPlan, createTestSample, validateTestSample, formatTemplateLabel } from '../lib/ua-test-plan.mjs'
 import { protocolForModel, matchesAccountSite } from '../lib/ua-protocol.mjs'
 import { accountValues, accountPayload, accountFieldErrors, normalizedAccountDraft, accountDraftDirty } from './accounts.js'
 
@@ -13,6 +13,18 @@ export function templateGroups(templates = []) {
     groups.get(item.id).push(item)
   }
   return [...groups.values()].map(items => items.sort((a, b) => b.revision - a.revision))
+}
+export function bindingTemplateLabel(binding, templates = []) {
+  if (binding?.mode === 'template') {
+    const template = (Array.isArray(templates) ? templates : []).find(item => item.id === binding.id && item.revision === binding.revision)
+    return template ? formatTemplateLabel(template) : `${binding.id} @ ${binding.revision}`
+  }
+  return binding?.mode === 'auto' ? '自动：固定 Codex / Claude 版本' : '普通转发'
+}
+export function testTemplateLabel(value, templates = []) {
+  if (!value?.templateId) return '普通转发'
+  const template = value.template ?? (Array.isArray(templates) ? templates : []).find(item => item.id === value.templateId && item.revision === value.revision)
+  return template ? formatTemplateLabel(template) : `${value.templateId} @ ${value.revision}`
 }
 export function forkTemplate(base, name) {
   const draft = clone(base)
@@ -455,8 +467,7 @@ async function mount() {
     if (next === 'tests') syncTestConnection({ autoFetch: true })
   }
   function bindingLabel(binding) {
-    if (binding?.mode === 'template') return `${binding.id} @ ${binding.revision}`
-    return binding?.mode === 'auto' ? '自动：固定 Codex / Claude 版本' : '普通转发'
+    return bindingTemplateLabel(binding, state.templates)
   }
   function removeHostAccount(entry) {
     if (!hostAccountView(state, entry).removable) return
@@ -521,7 +532,7 @@ async function mount() {
     const archived = $('template-show-archived').checked
     $('template-list').replaceChildren(...templateGroups(state.templates).filter(items => archived || !items[0].archived).map(items => {
       const latest = items[0], card = node('article', undefined, 'tpl-card')
-      card.append(node('h3', latest.name), tag(latest.kind === 'builtin' ? '内置基线 · 只读' : latest.archived ? '已归档' : '我的模板'), tag(`v${latest.revision}`), node('p', latest.protocols.join(' / ')))
+      card.append(node('h3', formatTemplateLabel(latest)), tag(latest.kind === 'builtin' ? '内置基线 · 只读' : latest.archived ? '已归档' : '我的模板'), node('p', latest.protocols.join(' / ')))
       const uses = state.connections.filter(item => item.binding.id === latest.id || Object.values(item.modelBindings).some(binding => binding.id === latest.id)).length
       card.append(node('p', `${items.length} 个版本 · ${uses} 个连接引用`))
       const actions = node('div', undefined, 'card-actions')
@@ -539,13 +550,13 @@ async function mount() {
     const entries = groups.map(items => [items[0].id, items[0].name])
     options($('binding-template'), entries)
     options($('test-template'), entries)
-    options($('conn-binding'), [['auto', '自动：按协议选择'], ['passthrough', '普通转发'], ...groups.map(items => [keyOf(items[0]), `${items[0].name} @ ${items[0].revision}`])])
+    options($('conn-binding'), [['auto', '自动：按协议选择'], ['passthrough', '普通转发'], ...groups.map(items => [keyOf(items[0]), formatTemplateLabel(items[0])])])
     renderRevisions('binding'); renderRevisions('test')
     syncTestConnection({ autoFetch: view === 'tests' })
   }
   function renderRevisions(prefix, revision) {
     const id = $(`${prefix}-template`).value
-    options($(`${prefix}-revision`), state.templates.filter(item => item.id === id).sort((a, b) => b.revision - a.revision).map(item => [String(item.revision), `版本 ${item.revision}`]), revision === undefined ? undefined : String(revision))
+    options($(`${prefix}-revision`), state.templates.filter(item => item.id === id).sort((a, b) => b.revision - a.revision).map(item => [String(item.revision), formatTemplateLabel(item)]), revision === undefined ? undefined : String(revision))
   }
   function connectionDraft() {
     const auth = { ...(connection?.auth ?? { source: 'stored' }), mode: $('conn-auth-mode').value, key: $('conn-key').value, value: $('conn-value').value }
@@ -902,7 +913,9 @@ async function mount() {
   }
   function beginFork(base) {
     if (!allowLeave()) return
-    options($('template-base-select'), state.templates.filter(item => !item.archived).map(item => [keyOf(item), `${item.name} @ ${item.revision}`]), base ? keyOf(base) : 'builtin.codex@1')
+    const candidates = state.templates.filter(item => !item.archived)
+    const defaultBase = candidates.filter(item => item.id === 'builtin.codex').sort((a, b) => b.revision - a.revision)[0] ?? candidates[0]
+    options($('template-base-select'), candidates.map(item => [keyOf(item), formatTemplateLabel(item)]), base ? keyOf(base) : defaultBase ? keyOf(defaultBase) : undefined)
     $('template-base-name').value = base ? `${base.name} 副本` : ''
     $('template-base-dialog').showModal()
   }
@@ -962,7 +975,7 @@ async function mount() {
     for (const [id, value] of Object.entries({ 'tpl-detector': item.identity.detector, 'tpl-mode': item.identity.mode, 'tpl-session': item.identity.session, 'tpl-ua': item.identity.userAgent ?? '', 'tpl-version': item.identity.version ?? '', 'tpl-claude-compat': item.body.claudeCompatibility, 'tpl-prompt-cache-key': templatePromptCacheKey(item.body), 'tpl-identity-prompt': item.body.identityprompt ?? '', 'tpl-defaults': JSON.stringify(item.body.parameters.defaults, null, 2), 'tpl-overrides': JSON.stringify(item.body.parameters.overrides, null, 2), 'tpl-remove': item.body.parameters.remove.join('\n'), 'tpl-max-body': item.limits.maxBodyBytes, 'tpl-body-timeout': item.limits.bodyTimeoutMs, 'tpl-max-metadata': item.limits.maxMetadataBytes })) $(id).value = value
     $('tpl-codex-metadata').checked = item.body.codexMetadata; $('tpl-fast-beta').checked = item.body.fastBeta
     $('tpl-headers').tBodies[0].replaceChildren(); for (const header of item.headers) addHeader(header)
-    text('tpl-revision', item.id ? `v${item.revision}` : '新草稿'); text('tpl-base', item.basedOn ? `${item.basedOn.id} @ ${item.basedOn.revision}` : '内置基线')
+    text('tpl-revision', item.id ? formatTemplateLabel(item) : '新草稿'); text('tpl-base', item.basedOn ? (templateOrigin ? formatTemplateLabel(templateOrigin) : `${item.basedOn.id} @ ${item.basedOn.revision}`) : '内置基线')
     $('tpl-readonly').hidden = item.kind !== 'builtin'
     $('tpl-discard').hidden = item.kind === 'builtin'; $('tpl-save').hidden = item.kind === 'builtin'
     clearFormFeedback($('template-editor'))
@@ -974,7 +987,7 @@ async function mount() {
   function showHistory(id) {
     const items = state.templates.filter(item => item.id === id).sort((a,b) => b.revision-a.revision)
     text('history-title', `${items[0].name} · 版本历史`)
-    $('history-body').replaceChildren(...items.map(item => { const row = node('div', undefined,'history-row'); row.append(node('span', `版本 ${item.revision} · ${item.protocols.join('/')}`)); const actions = node('div', undefined,'toolbar-actions'); actions.append(button('查看', () => { $('template-history').close(); editTemplate(item) }), button('与上一版比较', () => { const previous = items.find(other => other.revision === item.revision-1); $('history-diff').replaceChildren(...differences(previous ?? {}, item).map(change => node('p', `${change.action} ${change.path}`, 'hint'))) }), button('应用 / 回退', () => { $('template-history').close(); openBinding([], item) })); if (item.kind === 'custom') actions.append(button('删除', async () => { if (window.confirm('删除这个未被使用的版本？此操作不能撤销。')) await run('templates/remove', { id, revision: item.revision }, () => { $('template-history').close() }) },'danger')); row.append(actions); return row }))
+    $('history-body').replaceChildren(...items.map(item => { const row = node('div', undefined,'history-row'); row.append(node('span', `${formatTemplateLabel(item)} · ${item.protocols.join('/')}`)); const actions = node('div', undefined,'toolbar-actions'); actions.append(button('查看', () => { $('template-history').close(); editTemplate(item) }), button('与上一版比较', () => { const previous = items.find(other => other.revision === item.revision-1); $('history-diff').replaceChildren(...differences(previous ?? {}, item).map(change => node('p', `${change.action} ${change.path}`, 'hint'))) }), button('应用 / 回退', () => { $('template-history').close(); openBinding([], item) })); if (item.kind === 'custom') actions.append(button('删除', async () => { if (window.confirm('删除这个未被使用的版本？此操作不能撤销。')) await run('templates/remove', { id, revision: item.revision }, () => { $('template-history').close() }) },'danger')); row.append(actions); return row }))
     $('history-diff').replaceChildren(); text('history-error', ''); $('template-history').showModal()
   }
   function selectedTestConnection() { return state.connections.find(item => item.id === $('test-connection').value) }
@@ -999,7 +1012,7 @@ async function mount() {
   }
   function planInputs() {
     const source = $('test-template-source').value
-    const connection = selectedTestConnection() ?? { id: 'preview-only', name: '离线预览', baseURL: 'https://preview.invalid', protocol: $('test-protocol').value, apiPaths: {}, binding: { mode: 'auto', resolvedVersions: { responses: { id: 'builtin.codex', revision: 1 }, anthropic: { id: 'builtin.claude-code', revision: 1 } } } }
+    const connection = selectedTestConnection() ?? null
     const input = { snapshot: state, connection, kind: $('test-kind').value, protocol: $('test-protocol').value, model: currentTestModel(), operation: $('test-operation').value,
       stream: $('test-stream').checked, templateMode: source === 'auto' ? 'auto' : 'binding', apiPath: $('test-kind').value === 'check' ? undefined : $('test-api-path').value.trim() || undefined }
     if (source === 'ref' && input.kind !== 'check') input.templateRef = { id: $('test-template').value, revision: Number($('test-revision').value) }
@@ -1015,14 +1028,14 @@ async function mount() {
       testPlan = createTestPlan(planInputs())
       if ($('test-kind').value !== 'check') validateTestSample(jsonObject($('test-body').value, '请求正文'), testPlan)
       text('test-plan-url', `${testPlan.method} ${testPlan.url}`)
-      text('test-plan-template', testPlan.templateId ? `模板：${testPlan.template?.name ?? testPlan.templateId} @ ${testPlan.revision}` : '模板：普通转发')
+      text('test-plan-template', testPlan.templateId ? `模板：${testTemplateLabel(testPlan, state.templates)}` : '模板：普通转发')
       text('test-plan-note', [testPlan.resolution?.message, ...(testPlan.warnings ?? [])].filter(Boolean).join(' '))
       text('test-plan-state', '准备就绪')
       text('test-plan-error', '')
     } catch (cause) {
       testPlanError = cause.message
       text('test-plan-url', testPlan ? `${testPlan.method} ${testPlan.url}` : '请选择连接与模型并核对本次协议')
-      text('test-plan-template', testPlan?.templateId ? `模板：${testPlan.template?.name ?? testPlan.templateId} @ ${testPlan.revision}` : '')
+      text('test-plan-template', testPlan?.templateId ? `模板：${testTemplateLabel(testPlan, state.templates)}` : '')
       text('test-plan-note', '')
       text('test-plan-state', '需要核对')
       text('test-plan-error', testPlanError)
@@ -1160,7 +1173,7 @@ async function mount() {
     $('test-result').replaceChildren(node('h2', result.kind === 'preview' ? '本地转换预览' : result.kind === 'check' ? '模型列表检查' : '直测此连接'))
     $('test-result').append(node('p', result.status === 'passed' ? '通过' : '未通过', `result-state ${result.status === 'passed' ? '' : 'failed'}`), node('p', result.error ?? result.message ?? '这是本次请求的固定结果；改变表单后会标记为上一次测试。', 'hint'))
     const summary = node('dl', undefined,'kv')
-    for (const [label,value] of [['连接',result.connectionName ?? result.connectionId ?? '离线预览'],['模型',result.model || '模型列表检查'],['测试时间',catalogTime(result.testedAt ?? new Date().toISOString())],['模板', result.templateId ? `${result.templateId} @ ${result.revision}` : '普通转发 / 未使用'],['上游协议',result.protocol ?? '模型列表'],['HTTP',result.httpStatus ?? (result.kind === 'preview' ? '未联网' : '未收到响应')],['耗时', `${result.durationMs ?? 0} ms`],['原始身份',result.callerIdentity ?? '未判断']]) { const row = node('div'); row.append(node('dt',label),node('dd',value)); summary.append(row) }
+    for (const [label,value] of [['连接',result.connectionName ?? result.connectionId ?? '离线预览'],['模型',result.model || '模型列表检查'],['测试时间',catalogTime(result.testedAt ?? new Date().toISOString())],['模板', result.templateId ? testTemplateLabel(result, state.templates) : '普通转发 / 未使用'],['上游协议',result.protocol ?? '模型列表'],['HTTP',result.httpStatus ?? (result.kind === 'preview' ? '未联网' : '未收到响应')],['耗时', `${result.durationMs ?? 0} ms`],['原始身份',result.callerIdentity ?? '未判断']]) { const row = node('div'); row.append(node('dt',label),node('dd',value)); summary.append(row) }
     $('test-result').append(summary)
     if (result.request?.url) $('test-result').append(node('p', `${result.request.method ?? 'POST'} ${result.request.url}`, 'test-plan-url'))
     if (result.resolution?.message) $('test-result').append(node('p',result.resolution.message,'hint'))
@@ -1205,7 +1218,7 @@ async function mount() {
       if (kind !== 'preview') {
         if (!payload.connectionId) throw new Error('请选择要直测的连接')
         text('test-confirm-text', kind === 'infer' ? '此操作将发送一次简短模型请求，可能产生费用；不自动重试或切换连接。测试选项不会改变保存的绑定。' : '此操作只读取模型列表，不发送生成请求。')
-        $('test-confirm-detail').replaceChildren(node('p', selectedTestConnection()?.name ?? ''), node('p', `${testPlan.method} ${testPlan.url}`, 'test-plan-url'), node('p', `模型：${kind === 'check' ? '目录检查' : testPlan.model} · 协议：${testPlan.protocol}`), node('p', testPlan.templateId ? `模板：${testPlan.template?.name ?? testPlan.templateId} @ ${testPlan.revision}` : '模板：普通转发'), node('p', testPlan.resolution?.message ?? '', 'hint'))
+        $('test-confirm-detail').replaceChildren(node('p', selectedTestConnection()?.name ?? ''), node('p', `${testPlan.method} ${testPlan.url}`, 'test-plan-url'), node('p', `模型：${kind === 'check' ? '目录检查' : testPlan.model} · 协议：${testPlan.protocol}`), node('p', testPlan.templateId ? `模板：${testTemplateLabel(testPlan, state.templates)}` : '模板：普通转发'), node('p', testPlan.resolution?.message ?? '', 'hint'))
         $('test-confirm').showModal()
         const choice = await new Promise(resolve => $('test-confirm').addEventListener('close', () => resolve($('test-confirm').returnValue), { once: true }))
         if (choice !== 'confirm') return

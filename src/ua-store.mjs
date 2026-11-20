@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { builtinTemplates, validateTemplate } from './ua-transform.mjs';
+import { DEFAULT_AUTO_RESOLVED } from '../lib/ua-protocol.mjs';
 
 const SCHEMA_VERSION = 1;
 const MAX_STORE_BYTES = 8 * 1024 * 1024;
@@ -15,7 +16,8 @@ const PROTECTED_SEED_VERSIONS = new Set(['custom.claude-vscode-2316@1']);
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TEMPLATE_ID = /^(?:builtin|custom)\.[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const BAD_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
-const DEFAULT_AUTO_RESOLVED = {
+// On disk, shorthand auto bindings predate explicit pins and meant the original pair.
+const LEGACY_AUTO_RESOLVED = {
   responses: { id: 'builtin.codex', revision: 1 },
   anthropic: { id: 'builtin.claude-code', revision: 1 },
 };
@@ -108,7 +110,7 @@ function assertTemplateRef(templates, id, revision) {
   }
 }
 
-function normalizeBinding(raw) {
+function normalizeBinding(raw, autoRefs = DEFAULT_AUTO_RESOLVED) {
   if (!isObject(raw)) throw fail('模板绑定必须是对象', 400, 'binding');
   onlyKeys(raw, ['mode', 'id', 'revision', 'resolvedVersions'], 'binding');
   if (!['auto', 'template', 'passthrough'].includes(raw.mode)) throw fail('模板绑定模式无效', 400, 'binding');
@@ -118,7 +120,7 @@ function normalizeBinding(raw) {
   }
   if (raw.mode === 'auto') {
     if (raw.id !== undefined || raw.revision !== undefined) throw fail('auto 绑定不能包含模板 id', 400, 'binding');
-    const resolved = raw.resolvedVersions ?? DEFAULT_AUTO_RESOLVED;
+    const resolved = raw.resolvedVersions ?? autoRefs;
     if (!isObject(resolved)) throw fail('auto 绑定版本无效', 400, 'binding');
     const output = {};
     for (const [protocol, ref] of Object.entries(resolved)) {
@@ -137,17 +139,17 @@ function normalizeBinding(raw) {
   return { mode: 'template', id: raw.id.trim(), revision: raw.revision };
 }
 
-function normalizeModelBindings(raw) {
+function normalizeModelBindings(raw, autoRefs) {
   if (!isObject(raw)) throw fail('模型绑定必须是对象', 400, 'modelBindings');
   const output = {};
   for (const [model, binding] of Object.entries(raw)) {
     if (!isText(model) || BAD_KEYS.has(model)) throw fail('模型绑定名称无效', 400, 'modelBindings');
-    output[model] = normalizeBinding(binding);
+    output[model] = normalizeBinding(binding, autoRefs);
   }
   return output;
 }
 
-function normalizeConnectionShape(raw) {
+function normalizeConnectionShape(raw, autoRefs = DEFAULT_AUTO_RESOLVED) {
   if (!isObject(raw)) throw fail('连接必须是对象', 400, 'connection');
   onlyKeys(raw, ['id', 'name', 'enabled', 'revision', 'siteId', 'independent', 'baseURL', 'protocol', 'apiPaths', 'modelProtocols', 'models', 'auth', 'binding', 'modelBindings', 'secrets', 'newApiAccountId'], 'connection');
   let id;
@@ -212,8 +214,8 @@ function normalizeConnectionShape(raw) {
     auth = { mode, key: authRaw.key ?? '', value: authRaw.value ?? '', source };
   }
 
-  const binding = raw.binding === undefined ? undefined : normalizeBinding(raw.binding);
-  const modelBindings = raw.modelBindings === undefined ? {} : normalizeModelBindings(raw.modelBindings);
+  const binding = raw.binding === undefined ? undefined : normalizeBinding(raw.binding, autoRefs);
+  const modelBindings = raw.modelBindings === undefined ? {} : normalizeModelBindings(raw.modelBindings, autoRefs);
   const newApiAccountId = raw.newApiAccountId;
   if (newApiAccountId !== undefined && (typeof newApiAccountId !== 'string' || newApiAccountId.length > 200 || /[\x00-\x1f\x7f-\x9f]/.test(newApiAccountId))) throw fail('余额与签到账号绑定无效', 400, 'newApiAccountId');
 
@@ -311,7 +313,7 @@ function normalizeState(raw) {
       if (versions.has(key)) throw new Error();
       versions.add(key);
     }
-    const connections = raw.connections.map((item) => normalizeConnectionShape(item));
+    const connections = raw.connections.map((item) => normalizeConnectionShape(item, LEGACY_AUTO_RESOLVED));
     const ids = new Set();
     for (const connection of connections) {
       if (!connection.id || ids.has(connection.id)) throw new Error();
