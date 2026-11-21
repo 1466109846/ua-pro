@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
-import { AccountValidationError, createNewApiClient, NewApiError, normalizeAccountConfig, safeNewApiMessage } from './newapi.mjs';
+import { AccountValidationError, createNewApiClient, NewApiError, normalizeAccountConfig, safeNewApiMessage, usesAnyRouterSignIn } from './newapi.mjs';
 import { scheduleDate, scheduleOccurrence } from './schedule.mjs';
 
 export { AccountValidationError } from './newapi.mjs';
@@ -185,7 +185,8 @@ export function createAccountManager({ path, fetchImpl, now = () => new Date(), 
     let reading; let failure;
     try {
       reading = await api.balance({ ...captured });
-      if (!reading || !Number.isSafeInteger(reading.quota) || !Number.isSafeInteger(reading.usedQuota) || reading.usedQuota < 0 || !Number.isSafeInteger(reading.requestCount) || reading.requestCount < 0) throw new NewApiError('response');
+      if (!reading || !Number.isSafeInteger(reading.quota) || !Number.isSafeInteger(reading.usedQuota) || reading.usedQuota < 0) throw new NewApiError('response');
+      if (reading.requestCount !== null && (!Number.isSafeInteger(reading.requestCount) || reading.requestCount < 0)) throw new NewApiError('response');
     } catch (error) { failure = safeNewApiMessage(error); }
     return locked(async () => {
       const state = await read(); const current = own(state, captured.id);
@@ -194,12 +195,13 @@ export function createAccountManager({ path, fetchImpl, now = () => new Date(), 
       if (!failure) {
         const prior = current.snapshot;
         const usedReset = Boolean(prior && reading.usedQuota < prior.usedQuota);
-        const requestReset = Boolean(prior && reading.requestCount < prior.requestCount);
+        const countsAvailable = prior?.requestCount != null && reading.requestCount !== null;
+        const requestReset = countsAvailable && reading.requestCount < prior.requestCount;
         current.snapshot = { at: reading.at && Number.isFinite(Date.parse(reading.at)) ? new Date(reading.at).toISOString() : at,
           quota: reading.quota, usedQuota: reading.usedQuota, requestCount: reading.requestCount,
           deltaQuota: prior ? reading.quota - prior.quota : null,
           deltaUsedQuota: prior && !usedReset ? reading.usedQuota - prior.usedQuota : null,
-          deltaRequests: prior && !requestReset ? reading.requestCount - prior.requestCount : null,
+          deltaRequests: countsAvailable && !requestReset ? reading.requestCount - prior.requestCount : null,
           reset: usedReset || requestReset };
         current.history = [...current.history, current.snapshot].slice(-MAX_HISTORY);
       }
@@ -310,12 +312,13 @@ export function createAccountManager({ path, fetchImpl, now = () => new Date(), 
           return { skip: successful(attempted.checkin) ? alreadyResult(captured, attempted) : publicAccount(captured) };
         }
       }
-      const authoritative = captured.siteType === 'newapi' && api.authoritativeCheckinDay;
+      const hasCalendar = captured.siteType === 'newapi' && !usesAnyRouterSignIn(captured);
+      const authoritative = hasCalendar && api.authoritativeCheckinDay;
       const known = sameIdentity.find(a => successful(a.checkin)
         && (attemptDay(a.checkin, captured.schedule.timeZone) ?? a.checkin.dedupeDay ?? a.checkin.date) === scheduleDay);
       if (known && !authoritative) {
-        // A repeated AgentRouter query reports done/already without touching the first reward record.
-        if (captured.siteType === 'agentrouter') return { skip: alreadyResult(captured, known) };
+        // Protocols without a calendar report same-day repeats from the first confirmed record.
+        if (!hasCalendar) return { skip: alreadyResult(captured, known) };
         if (captured !== known) { captured.checkin = { ...known.checkin }; await write(state); }
         return { skip: publicAccount(captured) };
       }

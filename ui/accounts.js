@@ -94,10 +94,41 @@ export async function requestConnectionUsage(fetcher, connection = {}) {
 }
 
 
+/** Only the two fixed NewAPI strategies are stored; anything else falls back to auto. */
+export function normalizeCheckinProtocol(value) {
+  return value === 'checkin' || value === 'sign_in' ? value : 'auto';
+}
+
+/** Auto uses AnyRouter only for the official https://anyrouter.top origin. */
+export function effectiveCheckinProtocol(siteType, checkinProtocol, siteUrl) {
+  if (siteType === 'agentrouter') return 'login';
+  const protocol = normalizeCheckinProtocol(checkinProtocol);
+  if (protocol !== 'auto') return protocol;
+  try {
+    return new URL(String(siteUrl ?? '').trim()).origin === 'https://anyrouter.top' ? 'sign_in' : 'checkin';
+  } catch {
+    return 'checkin';
+  }
+}
+
+export function checkinProtocolHint({ siteType = 'newapi', checkinProtocol = 'auto', siteUrl = '', authMode = 'cookie' } = {}) {
+  if (siteType === 'agentrouter') return '';
+  const protocol = normalizeCheckinProtocol(checkinProtocol);
+  const effective = effectiveCheckinProtocol(siteType, protocol, siteUrl);
+  if (effective === 'sign_in') {
+    const automatic = protocol === 'auto' ? '自动识别为 AnyRouter 官方站点，' : '';
+    return `${automatic}使用 AnyRouter Cookie 签到，需要含 session 的完整站点登录 Cookie。只保存只读令牌也可以保存账号，签到时后端会提示补充 Cookie。`;
+  }
+  const automatic = protocol === 'auto' ? '自动：当前站点使用标准 New API 月历签到。' : '';
+  const suffix = authMode === 'token' ? '余额查询令牌只用于只读查询，签到时如需 Cookie 由后端提示补充。' : '';
+  return `${automatic || '使用标准 New API 月历签到。'}${suffix}`;
+}
+
 export function accountValues(account = {}) {
   return {
     id: account.id, name: account.name ?? '', siteType: account.siteType === 'agentrouter' ? 'agentrouter' : 'newapi',
     siteUrl: account.siteUrl ?? '', userId: account.userId ?? '', username: account.username ?? '',
+    checkinProtocol: normalizeCheckinProtocol(account.checkinProtocol),
     authMode: account.authMode ?? 'token', accessToken: '', cookie: '', password: '',
     quotaPerUnit: account.quotaPerUnit ?? 500000, unit: account.unit ?? 'USD',
     enabled: account.enabled ?? true, checkinEnabled: account.checkinEnabled ?? true,
@@ -110,7 +141,10 @@ export function accountValues(account = {}) {
 
 export function accountPayload(values) {
   const { clearAccessToken, clearCookie, clearPassword, scheduleEnabled = false, scheduleTime = '09:00', scheduleTimeZone = 'UTC', ...raw } = values;
-  const account = { ...raw, siteType: raw.siteType === 'agentrouter' ? 'agentrouter' : 'newapi', username: String(raw.username ?? '').trim(), quotaPerUnit: Number(raw.quotaPerUnit), schedule: { enabled: scheduleEnabled, time: scheduleTime, timeZone: scheduleTimeZone } };
+  const siteType = raw.siteType === 'agentrouter' ? 'agentrouter' : 'newapi';
+  const account = { ...raw, siteType, username: String(raw.username ?? '').trim(), quotaPerUnit: Number(raw.quotaPerUnit), schedule: { enabled: scheduleEnabled, time: scheduleTime, timeZone: scheduleTimeZone } };
+  if (siteType === 'newapi') account.checkinProtocol = normalizeCheckinProtocol(raw.checkinProtocol);
+  else delete account.checkinProtocol;
   if (!account.password) delete account.password;
   const clearSecrets = [];
   if (clearAccessToken) { clearSecrets.push('accessToken'); account.accessToken = ''; }
@@ -162,6 +196,7 @@ export function normalizedAccountDraft(values = {}, secrets = {}) {
     siteUrl: text(values.siteUrl),
     userId: text(values.userId),
     username: text(values.username),
+    checkinProtocol: values.siteType === 'agentrouter' ? 'auto' : normalizeCheckinProtocol(values.checkinProtocol),
     authMode: values.authMode === 'cookie' ? 'cookie' : 'token',
     quotaPerUnit: number(values.quotaPerUnit),
     unit: text(values.unit),
@@ -257,9 +292,10 @@ export async function initializeAccounts() {
   const get = (id) => document.getElementById(id);
   const editor = get('account-editor');
   const history = get('account-history');
-  const controls = { name: 'account-name', siteType: 'site-type', siteUrl: 'site-url', userId: 'user-id', username: 'agent-username', authMode: 'auth-mode', accessToken: 'access-token', cookie: 'account-cookie', password: 'agent-password', quotaPerUnit: 'quota-per-unit', unit: 'unit', enabled: 'account-enabled', checkinEnabled: 'checkin-enabled', scheduleEnabled: 'schedule-enabled', scheduleTime: 'schedule-time', scheduleTimeZone: 'schedule-timezone', clearAccessToken: 'clear-token', clearCookie: 'clear-cookie', clearPassword: 'clear-password' };
+  const controls = { name: 'account-name', siteType: 'site-type', siteUrl: 'site-url', userId: 'user-id', username: 'agent-username', checkinProtocol: 'checkin-protocol', authMode: 'auth-mode', accessToken: 'access-token', cookie: 'account-cookie', password: 'agent-password', quotaPerUnit: 'quota-per-unit', unit: 'unit', enabled: 'account-enabled', checkinEnabled: 'checkin-enabled', scheduleEnabled: 'schedule-enabled', scheduleTime: 'schedule-time', scheduleTimeZone: 'schedule-timezone', clearAccessToken: 'clear-token', clearCookie: 'clear-cookie', clearPassword: 'clear-password' };
   const checks = new Set(['enabled', 'checkinEnabled', 'scheduleEnabled', 'clearAccessToken', 'clearCookie', 'clearPassword']);
   const fieldIds = { name: 'account-name', siteUrl: 'site-url', userId: 'user-id', username: 'agent-username',
+    checkinProtocol: 'checkin-protocol',
     authMode: 'auth-mode', accessToken: 'access-token', cookie: 'account-cookie', password: 'agent-password',
     quotaPerUnit: 'quota-per-unit', unit: 'unit',
     'schedule.enabled': 'schedule-enabled', 'schedule.time': 'schedule-time', 'schedule.timeZone': 'schedule-timezone' };
@@ -406,12 +442,22 @@ export async function initializeAccounts() {
     get('accounts-status').textContent = statusSummary();
     syncControls();
   }
+  function updateCheckinProtocolHint() {
+    get('checkin-protocol-hint').textContent = checkinProtocolHint({
+      siteType: get('site-type').value,
+      checkinProtocol: get('checkin-protocol').value,
+      siteUrl: get('site-url').value,
+      authMode: get('auth-mode').value,
+    });
+  }
   function credentialFields() {
     const agentRouter = get('site-type').value === 'agentrouter';
     get('agentrouter-fields').hidden = !agentRouter;
+    get('checkin-protocol-field').hidden = agentRouter;
     get('user-id').required = !agentRouter;
     get('token-field').hidden = get('auth-mode').value !== 'token' && !editing?.secrets?.accessToken;
     get('cookie-field').hidden = get('auth-mode').value !== 'cookie' && !editing?.secrets?.cookie;
+    updateCheckinProtocolHint();
   }
   function scheduleFields() {
     get('schedule-settings').hidden = !get('schedule-enabled').checked;
@@ -654,6 +700,8 @@ export async function initializeAccounts() {
   get('history-close').addEventListener('click', () => history.close());
   get('auth-mode').addEventListener('change', credentialFields);
   get('site-type').addEventListener('change', credentialFields);
+  get('site-url').addEventListener('input', updateCheckinProtocolHint);
+  get('checkin-protocol').addEventListener('change', updateCheckinProtocolHint);
   get('schedule-enabled').addEventListener('change', scheduleFields);
   get('accounts-retry').addEventListener('click', () => { if (!running && !loading) void load(); });
   get('editor-recheck').addEventListener('click', () => { if (!running && !loading) void load(); });

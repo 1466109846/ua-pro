@@ -1,6 +1,6 @@
 import { createTestPlan, createTestSample, validateTestSample, formatTemplateLabel } from '../lib/ua-test-plan.mjs'
 import { protocolForModel, matchesAccountSite } from '../lib/ua-protocol.mjs'
-import { accountValues, accountPayload, accountFieldErrors, normalizedAccountDraft, accountDraftDirty } from './accounts.js'
+import { accountValues, accountPayload, accountFieldErrors, normalizedAccountDraft, accountDraftDirty, normalizeCheckinProtocol, checkinProtocolHint } from './accounts.js'
 
 export const PROTOCOLS = ['anthropic', 'responses', 'chat-completions', 'gemini']
 export const OPERATIONS = { anthropic: ['messages', 'count_tokens'], responses: ['responses'], 'chat-completions': ['chat/completions'], gemini: ['generateContent', 'streamGenerateContent', 'countTokens'] }
@@ -194,16 +194,18 @@ export function selectTestModel(models, current = '') {
   return models.some(model => model.id === current) ? current : models[0]?.id ?? ''
 }
 export function connectionHostView(state = {}, connection = {}) {
-  const provider = connection.independent && connection.siteId ? `ua-pro-${connection.siteId}` : 'ua-pro'
+  const provider = connection.independent && connection.siteId ? `ua-pro-${connection.siteId.toLowerCase()}` : 'ua-pro'
   const host = state.runtime?.connections?.find(item => item.connectionId === connection.id)
   if (connection.enabled === false) return { label: '连接已停用', detail: `${provider} · 此连接不参与模型请求` }
   if (state.runtime?.mode !== 'host') return { label: '仅本地保存，未同步到宿主', detail: `在 Magpie 打开 UA PRO 管理并同步后，连接位于 ${provider} 的账号列表` }
   if (host?.status === 'registered') return { label: '已注册到宿主', detail: `Magpie 供应商 ${host.provider || provider} · 账号 ${connection.name || host.account}；请刷新宿主模型列表` }
   if (host?.status === 'reload-required') return { label: '需重载插件', detail: `新增供应商 ${host.provider || provider} 尚未载入，请在 Magpie 重载 UA PRO` }
+  if (host?.status === 'signed-out') return { label: '宿主账号已移除', detail: `本地连接和模板保留；点击“同步到宿主”重新启用 ${host.provider || provider}，原生账号需重新登录` }
+  if (host?.status === 'legacy') return { label: '旧站点账号待恢复', detail: host.message || `请在概览核对并恢复到 ${provider}` }
   return { label: host?.status === 'conflict' ? '账号冲突，未覆盖' : '尚未同步到宿主', detail: host?.message || `点击“同步到宿主”注册到 ${provider} 的账号列表` }
 }
-const HOST_ACCOUNT_STATUSES = new Set(['mapped', 'unresolved', 'unsupported'])
-const HOST_ACCOUNT_LABELS = { mapped: '已关联', unresolved: '未关联', unsupported: '不支持', unknown: '状态未知' }
+const HOST_ACCOUNT_STATUSES = new Set(['mapped', 'unresolved', 'unsupported', 'legacy', 'native'])
+const HOST_ACCOUNT_LABELS = { mapped: '已关联', unresolved: '未关联', unsupported: '不支持', legacy: '旧站点待恢复', native: '原生凭据保留', unknown: '状态未知' }
 const hostAccountText = value => typeof value === 'string' ? value.trim() : ''
 const hostAccountList = value => Array.isArray(value) ? value : []
 export function hostAccountStatus(entry = {}) {
@@ -221,6 +223,8 @@ export function hostAccountView(state = {}, entry = {}) {
     const connectionName = hostAccountText(connection.name) || '未命名连接'
     return { ...base, connectionName, detail: `对应 WebUI 连接：${connectionName}` }
   }
+  if (status === 'legacy') return { ...base, recoverable: entry?.recoverable === true && Boolean(account) && Boolean(hostAccountText(entry?.fingerprint)), detail: message || `旧供应商 id 含大写；核对后可恢复到 ${hostAccountText(entry?.provider) || account.split('#')[0].toLowerCase()}，Key 与其他账号保留` }
+  if (status === 'native') return { ...base, detail: message || '原生凭据保留，请从对应站点打开管理核对' }
   if (status === 'unresolved') return {
     ...base,
     removable: entry?.removable === true && Boolean(account) && Boolean(hostAccountText(entry?.fingerprint)),
@@ -300,7 +304,7 @@ export function sessionRows(session) {
 }
 const FIELD_TARGETS = {
   'connections/save': { name: 'conn-name', baseURL: 'conn-base', auth: 'conn-auth-mode', protocol: 'conn-protocol', models: 'conn-models', modelProtocols: 'conn-model-protocols', apiPaths: 'conn-protocol', siteId: 'conn-site', independent: 'conn-independent', enabled: 'conn-enabled', newApiAccountId: 'conn-site-account', binding: 'conn-binding' },
-  'connection-accounts/save': { name: 'ca-name', siteUrl: 'ca-site', siteType: 'ca-site-type', userId: 'ca-user-id', username: 'ca-username', authMode: 'ca-auth-mode', accessToken: 'ca-credential', cookie: 'ca-credential', password: 'ca-password' },
+  'connection-accounts/save': { name: 'ca-name', siteUrl: 'ca-site', siteType: 'ca-site-type', checkinProtocol: 'ca-checkin-protocol', userId: 'ca-user-id', username: 'ca-username', authMode: 'ca-auth-mode', accessToken: 'ca-credential', cookie: 'ca-credential', password: 'ca-password' },
   'templates/save': { name: 'tpl-name' },
 }
 /** The form control a server-side field error belongs to, or '' when the form has none. */
@@ -474,6 +478,11 @@ async function mount() {
     if (!window.confirm('仅移除这个失效宿主登录引用，不删除站点账号、模板或其他连接。确认继续吗？')) return
     void run('host-accounts/remove', { account: entry.account, expectedFingerprint: entry.fingerprint, confirmRemoval: true })
   }
+  function restoreHostAccount(entry) {
+    if (!hostAccountView(state, entry).recoverable) return
+    if (!window.confirm(`将此旧账号恢复到 ${entry.provider}，保留原 Key 与元数据，只在宿主确认新槽位后移除当前旧引用。确认继续吗？`)) return
+    void run('host-accounts/restore', { account: entry.account, expectedFingerprint: entry.fingerprint, confirmRestore: true })
+  }
   function renderHostAccounts() {
     const panel = $('overview-host-accounts')
     panel.hidden = state.runtime?.mode !== 'host'
@@ -498,6 +507,7 @@ async function mount() {
       info.append(node('small', view.detail))
       actions.append(node('span', view.label, view.status === 'mapped' ? 'tag' : 'tag warn'))
       if (view.removable) actions.append(button('移除失效宿主账号', () => removeHostAccount(entry), 'danger'))
+      if (view.recoverable) actions.append(button('恢复旧站点账号', () => restoreHostAccount(entry)))
       row.append(info, actions)
       return row
     }))
@@ -679,6 +689,7 @@ async function mount() {
       name: $('ca-name').value,
       siteUrl: $('ca-site').value,
       siteType,
+      checkinProtocol: normalizeCheckinProtocol($('ca-checkin-protocol').value),
       userId: $('ca-user-id').value,
       username: $('ca-username').value,
       authMode,
@@ -702,14 +713,26 @@ async function mount() {
   function updateConnectionAccountAuth() {
     text('ca-credential-label', $('ca-auth-mode').value === 'token' ? '系统访问令牌' : 'Cookie')
   }
+  function updateConnectionCheckinProtocol() {
+    const agent = $('ca-site-type').value === 'agentrouter'
+    $('ca-checkin-protocol-field').hidden = agent
+    text('ca-checkin-protocol-hint', agent ? '' : checkinProtocolHint({
+      siteType: 'newapi',
+      checkinProtocol: $('ca-checkin-protocol').value,
+      siteUrl: $('ca-site').value,
+      authMode: $('ca-auth-mode').value,
+    }))
+  }
   function toggleConnectionAccountType() {
     const agent = $('ca-site-type').value === 'agentrouter'
     $('ca-agentrouter-fields').hidden = !agent
+    updateConnectionCheckinProtocol()
   }
   function fillConnectionAccountForm(values) {
     $('ca-name').value = values.name
     $('ca-site').value = values.siteUrl
     $('ca-site-type').value = values.siteType
+    $('ca-checkin-protocol').value = values.checkinProtocol
     $('ca-user-id').value = ''
     $('ca-auth-mode').value = values.authMode
     $('ca-credential').value = ''
@@ -831,6 +854,11 @@ async function mount() {
     $('ca-auth-mode').addEventListener('change', () => {
       $('ca-credential').value = ''
       updateConnectionAccountAuth()
+      updateConnectionCheckinProtocol()
+      updateConnectionAccountDirty()
+    })
+    $('ca-checkin-protocol').addEventListener('change', () => {
+      updateConnectionCheckinProtocol()
       updateConnectionAccountDirty()
     })
     $('ca-cancel').addEventListener('click', () => closeConnectionAccountDialog())

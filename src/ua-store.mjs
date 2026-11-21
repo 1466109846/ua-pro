@@ -50,7 +50,7 @@ function targetOf(value) {
   }
 }
 
-function normalizeBaseURL(value) {
+export function normalizeBaseURL(value) {
   if (typeof value !== 'string' || !value.trim()) throw fail('站点地址不能为空', 400, 'baseURL');
   const raw = value.trim();
   try {
@@ -151,7 +151,7 @@ function normalizeModelBindings(raw, autoRefs) {
 
 function normalizeConnectionShape(raw, autoRefs = DEFAULT_AUTO_RESOLVED) {
   if (!isObject(raw)) throw fail('连接必须是对象', 400, 'connection');
-  onlyKeys(raw, ['id', 'name', 'enabled', 'revision', 'siteId', 'independent', 'baseURL', 'protocol', 'apiPaths', 'modelProtocols', 'models', 'auth', 'binding', 'modelBindings', 'secrets', 'newApiAccountId'], 'connection');
+  onlyKeys(raw, ['id', 'name', 'enabled', 'revision', 'siteId', 'independent', 'baseURL', 'protocol', 'apiPaths', 'modelProtocols', 'models', 'auth', 'binding', 'modelBindings', 'secrets', 'newApiAccountId', 'nativeTemplateSelectionId'], 'connection');
   let id;
   if (raw.id !== undefined && raw.id !== '') {
     if (!isText(raw.id) || !STABLE_ID.test(raw.id.trim())) throw fail('连接 id 无效', 400, 'id');
@@ -218,11 +218,14 @@ function normalizeConnectionShape(raw, autoRefs = DEFAULT_AUTO_RESOLVED) {
   const modelBindings = raw.modelBindings === undefined ? {} : normalizeModelBindings(raw.modelBindings, autoRefs);
   const newApiAccountId = raw.newApiAccountId;
   if (newApiAccountId !== undefined && (typeof newApiAccountId !== 'string' || newApiAccountId.length > 200 || /[\x00-\x1f\x7f-\x9f]/.test(newApiAccountId))) throw fail('余额与签到账号绑定无效', 400, 'newApiAccountId');
+  const nativeTemplateSelectionId = raw.nativeTemplateSelectionId;
+  if (nativeTemplateSelectionId !== undefined && (source !== 'host' || typeof nativeTemplateSelectionId !== 'string' || !/^[a-f0-9]{64}$/.test(nativeTemplateSelectionId))) throw fail('原生模板选择标识无效', 400, 'nativeTemplateSelectionId');
 
   return {
     id, name: raw.name.trim(), enabled, revision, siteId, independent, baseURL, protocol,
     apiPaths, modelProtocols, models: [...modelsRaw], auth, binding, modelBindings,
     ...(newApiAccountId !== undefined ? { newApiAccountId: newApiAccountId.trim() } : {}),
+    ...(nativeTemplateSelectionId !== undefined ? { nativeTemplateSelectionId } : {}),
   };
 }
 
@@ -287,13 +290,14 @@ function validateConnectionBindings(state, connection) {
   }
 }
 
-function validateSites(connections) {
+function validateSites(connections, { legacy = false } = {}) {
   const bases = new Map();
   for (const connection of connections) {
     if (!connection.siteId) continue;
     const target = targetOf(connection.baseURL);
-    if (bases.has(connection.siteId) && bases.get(connection.siteId) !== target) throw fail('同一站点的 Base URL 必须一致', 400, 'siteId');
-    bases.set(connection.siteId, target);
+    const identity = legacy ? connection.siteId : connection.siteId.toLowerCase();
+    if (bases.has(identity) && bases.get(identity) !== target) throw fail('同一站点 id（不区分大小写）的 Base URL 必须一致', 400, 'siteId');
+    bases.set(identity, target);
   }
   const independent = new Set(connections.filter((item) => item.independent).map((item) => item.siteId));
   if (independent.size > 8) throw fail('独立站点最多 8 个', 400, 'independent');
@@ -302,7 +306,7 @@ function validateSites(connections) {
 function normalizeState(raw) {
   try {
     if (!isObject(raw)) throw new Error();
-    onlyKeys(raw, ['schemaVersion', 'generation', 'templates', 'connections'], 'store');
+    onlyKeys(raw, ['schemaVersion', 'generation', 'templates', 'connections', 'registrations'], 'store');
     if (raw.schemaVersion !== SCHEMA_VERSION) throw new Error();
     if (!Number.isInteger(raw.generation) || raw.generation < 0) throw new Error();
     if (!Array.isArray(raw.templates) || !Array.isArray(raw.connections)) throw new Error();
@@ -320,15 +324,23 @@ function normalizeState(raw) {
       ids.add(connection.id);
       validateConnectionBindings({ templates, connections }, connection);
     }
-    validateSites(connections);
-    return { schemaVersion: SCHEMA_VERSION, generation: raw.generation, templates, connections };
+    // Historical case-colliding sites remain readable for explicit recovery.
+    validateSites(connections, { legacy: true });
+    const registrations = raw.registrations ?? {};
+    if (!isObject(registrations)) throw new Error();
+    for (const [id, receipt] of Object.entries(registrations)) {
+      if (!ids.has(id) || !isObject(receipt) || !['pending', 'registered'].includes(receipt.state)) throw new Error();
+      onlyKeys(receipt, ['state', 'provider', 'account'], 'registrations');
+      if (receipt.state === 'registered' && (!isText(receipt.provider) || !isText(receipt.account))) throw new Error();
+    }
+    return { schemaVersion: SCHEMA_VERSION, generation: raw.generation, templates, connections, registrations };
   } catch {
     throw fail('状态文件内容无效，原文件未被修改', 500, 'store');
   }
 }
 
 function emptyState() {
-  return { schemaVersion: SCHEMA_VERSION, generation: 0, templates: [], connections: [] };
+  return { schemaVersion: SCHEMA_VERSION, generation: 0, templates: [], connections: [], registrations: {} };
 }
 
 export function createUAStore(path, { io = fs, uuid = randomUUID } = {}) {
@@ -425,7 +437,7 @@ export function createUAStore(path, { io = fs, uuid = randomUUID } = {}) {
     });
   }
 
-  async function snapshot({ secrets = false } = {}) {
+  async function snapshot({ secrets = false, lifecycle = false } = {}) {
     return enqueue(async () => {
       const state = (await load()) ?? emptyState();
       return {
@@ -433,7 +445,39 @@ export function createUAStore(path, { io = fs, uuid = randomUUID } = {}) {
         generation: state.generation,
         templates: state.templates.map((item) => publicTemplate(item)),
         connections: state.connections.map((item) => publicConnection(item, secrets === true)),
+        ...(lifecycle ? { registrations: structuredClone(state.registrations) } : {}),
       };
+    });
+  }
+
+  // Internal non-secret receipts distinguish first registration from a host sign-out.
+  // They are never accepted from an editable connection or included in public state.
+  async function confirmRegistration({ id, provider, account, expectedRevision } = {}) {
+    if (!isText(id) || !isText(provider) || !isText(account)) throw fail('宿主登记信息无效', 400, 'registration');
+    return enqueue(async () => {
+      const state = (await load()) ?? emptyState();
+      const connection = state.connections.find(item => item.id === id);
+      if (!connection || expectedRevision !== undefined && connection.revision !== expectedRevision) throw fail('连接已改变，宿主登记未更新', 409, 'registration');
+      const receipt = { state: 'registered', provider, account };
+      if (JSON.stringify(state.registrations[id]) !== JSON.stringify(receipt)) {
+        state.registrations[id] = receipt;
+        await persist(state);
+      }
+      return receipt;
+    });
+  }
+
+  async function moveHostReference({ account, provider, destination, beforeMove } = {}) {
+    return update(async state => {
+      const targets = state.connections.filter(item => item.auth.source === 'host' && item.auth.account === account);
+      await beforeMove?.();
+      for (const connection of targets) {
+        connection.auth.provider = provider;
+        connection.auth.account = destination;
+        connection.revision += 1;
+        state.registrations[connection.id] = { state: 'registered', provider, account: destination };
+      }
+      return { changed: targets.length > 0, value: { moved: targets.map(item => item.id) } };
     });
   }
 
@@ -538,7 +582,7 @@ export function createUAStore(path, { io = fs, uuid = randomUUID } = {}) {
     });
   }
 
-  async function saveConnection({ connection: raw, expectedRevision, clearSecrets = [] } = {}) {
+  async function saveConnection({ connection: raw, expectedRevision, clearSecrets = [] } = {}, { nativeSelection } = {}) {
     if (!isObject(raw)) throw fail('连接必须是对象', 400, 'connection');
     if (!Array.isArray(clearSecrets) || clearSecrets.some((field) => !['key', 'value'].includes(field))) throw fail('clearSecrets 无效', 400, 'clearSecrets');
     return update((state) => {
@@ -548,12 +592,27 @@ export function createUAStore(path, { io = fs, uuid = randomUUID } = {}) {
       if (!existing && expectedRevision !== undefined && expectedRevision !== 0) throw fail('连接已被其他窗口更新，请重新读取', 409, 'expectedRevision');
       if (existing) {
         if (expectedRevision !== undefined && expectedRevision !== existing.revision) throw fail('连接已被其他窗口更新，请重新读取', 409, 'expectedRevision');
+        if (nativeSelection) {
+          if (!isObject(nativeSelection) || shape.auth.source !== 'host' || existing.auth.source !== 'host' || shape.auth.provider !== existing.auth.provider || shape.auth.account !== existing.auth.account || shape.baseURL !== existing.baseURL) throw fail('原生模板选择不能修改其他账号连接', 409, 'auth');
+          if (existing.nativeTemplateSelectionId === nativeSelection.id) return { changed: false, value: { connection: publicConnection(existing, false), generation: state.generation } };
+          // Re-signing in applies to this account atomically, using its current
+          // stored configuration rather than an earlier loader's snapshot.
+          Object.assign(shape, structuredClone(existing), { protocol: nativeSelection.protocol, binding: normalizeBinding(nativeSelection.binding),
+            modelProtocols: {}, modelBindings: {}, nativeTemplateSelectionId: nativeSelection.id });
+        } else {
+          shape.binding = structuredClone(existing.binding);
+          shape.modelBindings = structuredClone(existing.modelBindings ?? {});
+          if (existing.nativeTemplateSelectionId !== undefined) shape.nativeTemplateSelectionId = existing.nativeTemplateSelectionId;
+          else delete shape.nativeTemplateSelectionId;
+        }
         shape.revision = existing.revision + 1;
-        shape.binding = structuredClone(existing.binding);
-        shape.modelBindings = structuredClone(existing.modelBindings ?? {});
       } else {
         shape.revision = 1;
         shape.binding = shape.binding ?? { mode: 'auto', resolvedVersions: structuredClone(DEFAULT_AUTO_RESOLVED) };
+      }
+      if (nativeSelection) {
+        if (!isObject(nativeSelection) || shape.auth.source !== 'host' || typeof nativeSelection.id !== 'string' || !/^[a-f0-9]{64}$/.test(nativeSelection.id)) throw fail('原生模板选择标识无效', 400, 'nativeTemplateSelectionId');
+        assertBindingResolvable(state, shape.binding, bindingProtocol(shape), { allowArchived: false });
       }
       shape.auth = mergeAuth(existing, shape, clearSecrets);
       const connections = existing
@@ -562,6 +621,7 @@ export function createUAStore(path, { io = fs, uuid = randomUUID } = {}) {
       validateSites(connections);
       validateConnectionBindings({ templates: state.templates }, shape);
       state.connections = connections;
+      if (!existing) state.registrations[shape.id] = { state: 'pending' };
       return {
         changed: true,
         value: (next) => ({ connection: publicConnection(shape, false), generation: next.generation }),
@@ -578,6 +638,7 @@ export function createUAStore(path, { io = fs, uuid = randomUUID } = {}) {
       if (expectedRevision !== undefined && expectedRevision !== existing.revision) throw fail('连接已被其他窗口更新，请重新读取', 409, 'expectedRevision');
       await beforeRemove?.(publicConnection(existing, false));
       state.connections = state.connections.filter((item) => item.id !== connectionId);
+      delete state.registrations[connectionId];
       return { changed: true, value: (next) => ({ id: connectionId, generation: next.generation }) };
     });
   }
@@ -629,7 +690,7 @@ export function createUAStore(path, { io = fs, uuid = randomUUID } = {}) {
 
   return {
     path, initialize, snapshot, saveTemplate, archiveTemplate, removeTemplate,
-    prepareConnection, saveConnection, removeConnection, applyBinding, applyModelRoute,
+    prepareConnection, saveConnection, removeConnection, confirmRegistration, moveHostReference, applyBinding, applyModelRoute,
   };
 }
 

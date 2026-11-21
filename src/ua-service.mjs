@@ -10,7 +10,7 @@ import { createKeyUsage } from './key-usage.mjs'
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const failure = (message, status = 400) => Object.assign(new Error(message), { status })
 
-export function createUAService({ store, legacyStore, accountManager, readAuth, fetchImpl, modelFetchFor, modelCatalog = createUAModelCatalog(store.path), onConnectionSaved, onConnectionRemoving, removeHostAccount, syncConnections, prepareState, runtime = () => ({ mode: 'standalone', observed: [] }) }) {
+export function createUAService({ store, legacyStore, accountManager, readAuth, fetchImpl, modelFetchFor, modelCatalog = createUAModelCatalog(store.path), onConnectionSaved, onConnectionRemoving, onConnectionRemoved, removeHostAccount, restoreHostAccount, syncConnections, prepareState, runtime = () => ({ mode: 'standalone', observed: [] }) }) {
   const test = createUATestRunner({ store, readAuth, fetchImpl, modelFetchFor })
   const initialized = async () => { await store.initialize(); await prepareState?.() }
   return {
@@ -75,7 +75,7 @@ export function createUAService({ store, legacyStore, accountManager, readAuth, 
       if (action === 'connection-accounts/save') {
         if (!accountManager) throw failure('站点账号管理尚未初始化', 409)
         const raw = data.account
-        const allowed = ['name', 'siteType', 'siteUrl', 'userId', 'username', 'password', 'authMode', 'accessToken', 'cookie', 'quotaPerUnit', 'unit', 'enabled', 'checkinEnabled', 'schedule']
+        const allowed = ['name', 'siteType', 'checkinProtocol', 'siteUrl', 'userId', 'username', 'password', 'authMode', 'accessToken', 'cookie', 'quotaPerUnit', 'unit', 'enabled', 'checkinEnabled', 'schedule']
         if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => !allowed.includes(key))) throw failure('此入口只创建站点账号，请使用账号管理页编辑已有账号')
         if (data.clearSecrets !== undefined && (!Array.isArray(data.clearSecrets) || data.clearSecrets.length)) throw failure('新账号不使用凭据清除标记')
         const root = siteRoot(data.baseURL)
@@ -113,7 +113,15 @@ export function createUAService({ store, legacyStore, accountManager, readAuth, 
         }
         return { ...result, registration: 'pending-host-load', activation: 'pending-runtime-observation' }
       }
-      if (action === 'connections/remove') return store.removeConnection(data, { beforeRemove: onConnectionRemoving })
+      if (action === 'connections/remove') {
+        const result = await store.removeConnection(data, { beforeRemove: onConnectionRemoving })
+        await onConnectionRemoved?.(result)
+        return result
+      }
+      if (action === 'host-accounts/restore') {
+        if (!restoreHostAccount) throw failure('请从宿主打开 UA PRO 管理后恢复', 409)
+        return restoreHostAccount(data)
+      }
       if (action === 'host-accounts/remove') {
         if (!removeHostAccount) throw failure('请从宿主打开 UA PRO 管理后操作', 409)
         return removeHostAccount(data)

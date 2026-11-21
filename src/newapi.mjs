@@ -3,6 +3,22 @@ import { normalizeSchedule, ScheduleValidationError } from './schedule.mjs';
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
 const RESPONSE_LIMIT = 1024 * 1024;
 const TIMEOUT_MS = 15000;
+const VERIFICATION = /验证码|人机验证|captcha|turnstile/iu;
+
+export function usesAnyRouterSignIn(account) {
+  if (account.siteType !== 'newapi') return false;
+  if (account.checkinProtocol !== 'auto') return account.checkinProtocol === 'sign_in';
+  return new URL(account.siteUrl).origin === 'https://anyrouter.top';
+}
+
+function signInReward(message, account) {
+  if (account.unit.toUpperCase() !== 'USD') return null;
+  const match = /(?:获得|奖励|领取|received|awarded|earned)\s*[$＄]\s*(\d+(?:\.\d+)?)(?!\d|[.,]\d|[eE][+-]?\d)/iu.exec(message);
+  if (!match) return null;
+  const scaled = Number(match[1]) * account.quotaPerUnit;
+  const quota = Math.round(scaled);
+  return Number.isSafeInteger(quota) && quota > 0 && Math.abs(scaled - quota) <= Number.EPSILON * scaled ? quota : null;
+}
 
 export class AccountValidationError extends Error {
   constructor(message = '账号配置无效。', status = 400, fields = {}) {
@@ -27,6 +43,7 @@ const ERRORS = Object.freeze({
   disabled: '该账号或签到功能未启用。',
   checkin: '签到未完成，请前往站点检查签到条件。',
   cookie_required: '当前令牌缺少签到权限或站点要求登录 Cookie，请检查令牌权限或改用 Cookie。',
+  session_required: 'AnyRouter 签到需要 Cookie 认证，请选择 Cookie 并填写含 session 的站点登录 Cookie。',
   turnstile: '站点要求验证码，请前往站点完成验证后签到。',
   ambiguous: '签到结果未确认；不会自动重试，请在站点确认记录。',
 });
@@ -79,6 +96,8 @@ export function normalizeAccountConfig(raw = {}) {
   }
   const siteType = text('siteType', 'newapi', 16);
   if (!['newapi', 'agentrouter'].includes(siteType)) fields.siteType = '请选择 New API 或 AgentRouter。';
+  const checkinProtocol = siteType === 'newapi' ? text('checkinProtocol', 'auto', 16) : 'auto';
+  if (!['auto', 'checkin', 'sign_in'].includes(checkinProtocol)) fields.checkinProtocol = '请选择自动、标准 New API 或 AnyRouter 签到。';
   let siteUrl = text('siteUrl', '', 2048);
   try {
     const url = new URL(siteUrl);
@@ -86,6 +105,7 @@ export function normalizeAccountConfig(raw = {}) {
     const loopback = /^127(?:\.\d{1,3}){3}$/u.test(url.hostname) || ['localhost', '::1', '[::1]'].includes(url.hostname.toLowerCase());
     siteUrl = url.href.replace(/\/+$/u, '');
     if (siteType === 'agentrouter' && url.protocol === 'http:' && !loopback) fields.siteUrl = 'AgentRouter 必须使用 HTTPS 或本机回环地址。';
+    if (checkinProtocol === 'sign_in' && url.protocol === 'http:' && !loopback) fields.siteUrl = 'AnyRouter 签到必须使用 HTTPS 或本机回环地址。';
   } catch { fields.siteUrl = '请输入不含账号、密码、查询参数或片段的 HTTP(S) 站点地址。'; }
   const userId = text('userId', '', 32);
   if (siteType === 'newapi' && !/^[1-9]\d*$/u.test(userId) || siteType === 'agentrouter' && userId && !/^[1-9]\d*$/u.test(userId)) fields.userId = '用户 ID 必须为正整数字符串。';
@@ -97,7 +117,7 @@ export function normalizeAccountConfig(raw = {}) {
   const password = raw.password ?? '';
   if (typeof password !== 'string' || CONTROL.test(password) || password.length > 4096) fields.password = '请输入不含控制字符且长度合理的密钥。';
   const accessToken = text('accessToken', '', 16384);
-  const cookie = text('cookie', '', 32768);
+  const cookie = text('cookie', '', 32768).replace(/^cookie:\s*/iu, '');
   const quotaPerUnit = raw.quotaPerUnit ?? 500000;
   if (typeof quotaPerUnit !== 'number' || !Number.isFinite(quotaPerUnit) || quotaPerUnit <= 0) fields.quotaPerUnit = '额度倍率必须为有限正数。';
   const unit = text('unit', 'USD', 32);
@@ -117,17 +137,18 @@ export function normalizeAccountConfig(raw = {}) {
     for (const field of Object.keys(error.fields)) fields[field] = messages[field] ?? messages.schedule;
   }
   if (Object.keys(fields).length) throw new AccountValidationError('账号配置无效。', 400, fields);
-  return { name, enabled, siteUrl, siteType, userId, username, password, authMode, accessToken, cookie, quotaPerUnit, unit, checkinEnabled, schedule };
+  return { name, enabled, siteUrl, siteType, checkinProtocol, userId, username, password, authMode, accessToken, cookie, quotaPerUnit, unit, checkinEnabled, schedule };
 }
 
 export function createNewApiClient({ fetchImpl = globalThis.fetch, now = () => new Date() } = {}) {
   if (typeof fetchImpl !== 'function') throw new AccountValidationError('缺少网络请求实现。');
   const timestamp = () => new Date(now()).toISOString();
 
-  async function request(account, endpoint, { method = 'GET', body, accountAuth = true, cookieJar } = {}) {
+  async function request(account, endpoint, { method = 'GET', body, accountAuth = true, cookieJar, anyRouter = false } = {}) {
     const url = new URL(`${account.siteUrl}${endpoint}`);
     if (url.origin !== new URL(account.siteUrl).origin) throw new NewApiError('redirect');
     const headers = { Accept: 'application/json' };
+    if (anyRouter) headers.Referer = `${account.siteUrl}/`;
     if (accountAuth) {
       if (account.siteType === 'agentrouter') {
         if (account.userId) headers['New-Api-User'] = account.userId;
@@ -165,6 +186,7 @@ export function createNewApiClient({ fetchImpl = globalThis.fetch, now = () => n
         const response = await fetchImpl(url.href, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual', credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal });
         const rejectResponse = (code, status = response.status) => { void response.body?.cancel().catch(() => {}); throw new NewApiError(code, status); };
         if (response.redirected || response.status >= 300 && response.status < 400 || response.url && new URL(response.url).origin !== url.origin) rejectResponse('redirect');
+        if (anyRouter && (response.headers.get('cf-mitigated') === 'challenge' || response.status === 403 && /^text\/html\b/iu.test(response.headers.get('content-type') ?? ''))) rejectResponse('turnstile');
         if (response.status === 401 || response.status === 403) rejectResponse('auth');
         if (!response.ok) rejectResponse('http');
         if (Number(response.headers.get('content-length')) > RESPONSE_LIMIT) rejectResponse('size');
@@ -182,8 +204,10 @@ export function createNewApiClient({ fetchImpl = globalThis.fetch, now = () => n
           if (size > RESPONSE_LIMIT) { void reader.cancel().catch(() => {}); throw new NewApiError('size'); }
           chunks.push(Buffer.from(value));
         }
+        const text = Buffer.concat(chunks, size).toString('utf8');
+        if (anyRouter && /^\s*</u.test(text) && (/^\s*(?:<!doctype\s+html\b|<html\b)/iu.test(text) || VERIFICATION.test(text))) throw new NewApiError('turnstile');
         let result;
-        try { result = JSON.parse(Buffer.concat(chunks, size).toString('utf8')); }
+        try { result = JSON.parse(text); }
         catch { throw new NewApiError('response'); }
         if (!result || typeof result !== 'object' || Array.isArray(result)) throw new NewApiError('response');
         return result;
@@ -209,16 +233,25 @@ export function createNewApiClient({ fetchImpl = globalThis.fetch, now = () => n
     return { at: timestamp(), quota: data.quota, usedQuota: data.used_quota, requestCount };
   }
 
-  async function balance(raw) {
-    const account = normalizeAccountConfig(raw);
-    if (account.siteType === 'agentrouter') return agentRouterBalance(account);
-    const result = await request(account, '/api/user/self');
+  async function verifiedSelf(account, anyRouter = false) {
+    const result = await request(account, '/api/user/self', { anyRouter });
+    if (anyRouter && result.success === false && typeof result.message === 'string' && VERIFICATION.test(result.message)) throw new NewApiError('turnstile');
     if (result.success !== true || !result.data || typeof result.data !== 'object') throw new NewApiError('response');
     const data = result.data;
     const id = typeof data.id === 'number' && Number.isSafeInteger(data.id) ? String(data.id) : data.id;
     if (typeof id !== 'string' || id !== account.userId) throw new NewApiError('identity');
-    if (!Number.isSafeInteger(data.quota) || !Number.isSafeInteger(data.used_quota) || data.used_quota < 0 || !Number.isSafeInteger(data.request_count) || data.request_count < 0) throw new NewApiError('response');
-    return { at: timestamp(), quota: data.quota, usedQuota: data.used_quota, requestCount: data.request_count };
+    return data;
+  }
+
+  async function balance(raw) {
+    const account = normalizeAccountConfig(raw);
+    if (account.siteType === 'agentrouter') return agentRouterBalance(account);
+    const anyRouter = usesAnyRouterSignIn(account);
+    const data = await verifiedSelf(account, anyRouter);
+    const requestCount = anyRouter && data.request_count == null ? null : data.request_count;
+    if (!Number.isSafeInteger(data.quota) || !Number.isSafeInteger(data.used_quota) || data.used_quota < 0) throw new NewApiError('response');
+    if (!(anyRouter && requestCount === null) && (!Number.isSafeInteger(requestCount) || requestCount < 0)) throw new NewApiError('response');
+    return { at: timestamp(), quota: data.quota, usedQuota: data.used_quota, requestCount };
   }
 
   async function agentRouterCheckin(account) {
@@ -254,12 +287,34 @@ export function createNewApiClient({ fetchImpl = globalThis.fetch, now = () => n
       userId: discovered, cookie: cookieJar.cookie, authenticated: true };
   }
 
+  async function anyRouterCheckin(account) {
+    if (account.authMode !== 'cookie' || !/(?:^|;)\s*session=[^;\s]+\s*(?=;|$)/u.test(account.cookie)) throw new NewApiError('session_required');
+    await verifiedSelf(account, true);
+    let result;
+    try { result = await request(account, '/api/user/sign_in', { method: 'POST', anyRouter: true }); }
+    catch (error) {
+      if (['turnstile', 'auth', 'redirect'].includes(error.code)) throw error;
+      if (error.code === 'http' && error.status >= 400 && error.status < 500) throw new NewApiError('checkin', error.status);
+      throw new NewApiError('ambiguous');
+    }
+    if (typeof result.success !== 'boolean' || result.message != null && typeof result.message !== 'string') throw new NewApiError('ambiguous');
+    const message = (result.message ?? '').trim();
+    if (VERIFICATION.test(message)) throw new NewApiError('turnstile');
+    // sign_in has no calendar endpoint. An empty success or an explicit duplicate means done.
+    if (result.success && !message || /已(?:经)?签到|(?:今日|今天).*签过|already.*(?:signed|checked)/iu.test(message)) {
+      return { state: 'already', date: null, rewardQuota: null };
+    }
+    if (!result.success) throw new NewApiError('checkin');
+    return { state: 'success', date: null, rewardQuota: signInReward(message, account) };
+  }
+
   async function checkin(raw, { turnstileToken } = {}) {
     const account = normalizeAccountConfig(raw);
     if (!account.enabled || !account.checkinEnabled) throw new NewApiError('disabled');
     if (account.siteType === 'agentrouter') return agentRouterCheckin(account);
+    if (usesAnyRouterSignIn(account)) return anyRouterCheckin(account);
     if (turnstileToken !== undefined && (typeof turnstileToken !== 'string' || CONTROL.test(turnstileToken) || turnstileToken.length > 4096)) throw new AccountValidationError('验证码参数无效。');
-    await balance(account);
+    await verifiedSelf(account);
     const site = await request(account, '/api/status');
     if (site.success !== true || !site.data || typeof site.data.turnstile_check !== 'boolean') throw new NewApiError('response');
     if (site.data.checkin_enabled === false) return { state: 'disabled', date: null, rewardQuota: null, checkedAt: null };

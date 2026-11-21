@@ -340,6 +340,10 @@
         <label class="field">站点类型<select id="ca-site-type"><option value="newapi">NewAPI</option><option value="agentrouter">AgentRouter</option></select></label>
         <label class="field">数字用户 ID<input id="ca-user-id" inputmode="numeric" autocomplete="off" placeholder="NewAPI 必填；AgentRouter 可留空"></label>
       </div>
+      <div id="ca-checkin-protocol-field" class="grid2">
+        <label class="field">NewAPI 签到协议<select id="ca-checkin-protocol"><option value="auto" selected>自动（推荐）</option><option value="checkin">标准 New API 月历</option><option value="sign_in">AnyRouter Cookie 签到</option></select></label>
+        <p class="hint" id="ca-checkin-protocol-hint">自动：AnyRouter 官方站点使用 Cookie 签到，需要含 session 的 Cookie；其他地址使用标准 New API 月历签到。</p>
+      </div>
       <div class="grid2">
         <label class="field">认证方式<select id="ca-auth-mode"><option value="cookie">Cookie（推荐）</option><option value="token">系统访问令牌</option></select></label>
         <label class="field"><span id="ca-credential-label">Cookie</span><input id="ca-credential" type="password" autocomplete="new-password" spellcheck="false"></label>
